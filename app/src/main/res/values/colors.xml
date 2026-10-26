@@ -1,7 +1,14 @@
 <resources>
-    <color name="focus_primary">#229ED9</color>
-    <color name="focus_on_surface_muted">#B2B6C1</color>
-    <color name="focus_surface">#1D2028</color>
-    <color name="focus_navigation">#181A21</color>
-    <color name="focus_navigation_selected">#262833</color>
+    <color name="focus_primary">#55B4E5</color>
+    <color name="focus_primary_variant">#2795C9</color>
+    <color name="focus_secondary">#55C4A1</color>
+    <color name="focus_background">#101318</color>
+    <color name="focus_surface">#191D24</color>
+    <color name="focus_surface_raised">#222832</color>
+    <color name="focus_outline">#343C48</color>
+    <color name="focus_on_surface">#F1F3F6</color>
+    <color name="focus_on_surface_muted">#AEB7C2</color>
+    <color name="focus_navigation">#171B21</color>
+    <color name="focus_navigation_selected">#244256</color>
+    <color name="focus_error">#F28B82</color>
 </resources>

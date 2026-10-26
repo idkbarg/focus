@@ -12,9 +12,7 @@ import android.graphics.Bitmap;
 import android.graphics.BitmapFactory;
 import android.graphics.Canvas;
 import android.graphics.Color;
-import android.graphics.Matrix;
 import android.graphics.Paint;
-import android.graphics.RectF;
 import android.graphics.Typeface;
 import android.graphics.pdf.PdfRenderer;
 import android.media.AudioAttributes;
@@ -51,10 +49,7 @@ import android.widget.ScrollView;
 import android.widget.TextView;
 import android.widget.HorizontalScrollView;
 import android.widget.GridLayout;
-import android.widget.ProgressBar;
-import android.widget.SeekBar;
 import android.widget.Toast;
-import android.widget.CheckBox;
 
 import androidx.annotation.Nullable;
 import androidx.appcompat.app.AppCompatActivity;
@@ -68,7 +63,15 @@ import androidx.core.view.WindowInsetsCompat;
 import com.google.android.material.button.MaterialButton;
 import com.google.android.material.card.MaterialCardView;
 import com.google.android.material.dialog.MaterialAlertDialogBuilder;
+import com.google.android.material.appbar.MaterialToolbar;
+import com.google.android.material.bottomnavigation.BottomNavigationView;
+import com.google.android.material.checkbox.MaterialCheckBox;
+import com.google.android.material.materialswitch.MaterialSwitch;
+import com.google.android.material.progressindicator.CircularProgressIndicator;
+import com.google.android.material.progressindicator.LinearProgressIndicator;
+import com.google.android.material.slider.Slider;
 import com.google.android.material.textfield.TextInputEditText;
+import com.google.android.material.textfield.TextInputLayout;
 
 import org.json.JSONArray;
 import org.json.JSONException;
@@ -142,13 +145,13 @@ public class MainActivity extends AppCompatActivity {
     private MaterialButton playerPlayButton;
     private TextView statsSummary;
     private TextView readerTimerLabel;
-    private TextView readerPlayerLabel;
     private TextView readerPageLabel;
     private MaterialButton readerTimerButton;
     private MaterialButton readerPlayerButton;
+    private MaterialButton readerOrientationButton;
     private MaterialButton readerPreviousButton;
     private MaterialButton readerNextButton;
-    private SeekBar readerPageSeekBar;
+    private Slider readerPageSlider;
     private TextInputEditText musicSearch;
     private TextView miniPlayerTitle;
     private TextView miniPlayerArtist;
@@ -179,14 +182,14 @@ public class MainActivity extends AppCompatActivity {
     private int currentPage;
     private int visibleTrackCount = LIBRARY_PAGE_SIZE;
     private int visiblePdfCount = LIBRARY_PAGE_SIZE;
-    private boolean pageRotated = true;
+    private boolean readerPortrait;
     private boolean readerControlsVisible = true;
     private boolean isHome = true;
     private LinearLayout readerControls;
     private HorizontalScrollView readerNavbar;
     private FrameLayout readerRoot;
     private PdfPageView pdfImage;
-    private ProgressBar pdfLoading;
+    private CircularProgressIndicator pdfLoading;
     private Typeface appTypeface;
     private long examDurationMillis = 90 * 60_000L;
     private long examRemainingMillis = examDurationMillis;
@@ -358,6 +361,7 @@ public class MainActivity extends AppCompatActivity {
         view.setTextSize(size);
         view.setTextColor(textColor);
         if (appTypeface != null) view.setTypeface(appTypeface);
+        view.setIncludeFontPadding(false);
         return view;
     }
 
@@ -365,9 +369,40 @@ public class MainActivity extends AppCompatActivity {
         MaterialButton button = new MaterialButton(this);
         button.setText(fa(label));
         button.setTextSize(14);
-        button.setCornerRadius(dp(14));
+        button.setCornerRadius(dp(4));
+        button.setInsetTop(0);
+        button.setInsetBottom(0);
+        button.setMinHeight(dp(48));
+        button.setBackgroundTintList(android.content.res.ColorStateList.valueOf(color(R.color.focus_primary)));
+        button.setTextColor(color(R.color.focus_background));
         if (appTypeface != null) button.setTypeface(appTypeface);
         return button;
+    }
+
+    private int color(int colorResource) {
+        return ContextCompat.getColor(this, colorResource);
+    }
+
+    private TextInputLayout inputContainer(TextInputEditText input, String label) {
+        TextInputLayout container = new TextInputLayout(this);
+        CharSequence inputHint = input.getHint();
+        String resolvedLabel = label == null || label.isEmpty()
+                ? inputHint == null ? "" : inputHint.toString() : label;
+        container.setHint(fa(resolvedLabel));
+        container.setBoxBackgroundMode(TextInputLayout.BOX_BACKGROUND_FILLED);
+        container.setBoxBackgroundColor(color(R.color.focus_surface_raised));
+        container.setBoxStrokeColor(color(R.color.focus_primary));
+        container.setBoxCornerRadii(dp(4), dp(4), dp(4), dp(4));
+        container.setHintTextColor(android.content.res.ColorStateList.valueOf(
+                color(R.color.focus_on_surface_muted)));
+        container.setErrorTextColor(android.content.res.ColorStateList.valueOf(color(R.color.focus_error)));
+        container.setEndIconMode(TextInputLayout.END_ICON_NONE);
+        input.setHint(null);
+        input.setTextColor(color(R.color.focus_on_surface));
+        input.setHintTextColor(color(R.color.focus_on_surface_muted));
+        if (appTypeface != null) input.setTypeface(appTypeface);
+        container.addView(input, new TextInputLayout.LayoutParams(-1, -2));
+        return container;
     }
 
     private String fa(String value) {
@@ -399,6 +434,9 @@ public class MainActivity extends AppCompatActivity {
             case "Nothing playing": return "چیزی در حال پخش نیست";
             case "Choose a track": return "یک آهنگ انتخاب کنید";
             case "Open music player": return "بازکردن پخش‌کنندهٔ موسیقی";
+            case "Close PDF reader": return "بستن PDF";
+            case "Switch to portrait reader": return "چرخش به حالت عمودی";
+            case "Switch to landscape reader": return "چرخش به حالت افقی";
             case "Page": return "صفحه";
             case "Add PDF": return "افزودن PDF";
             case "Scan folder": return "اسکن پوشه";
@@ -535,20 +573,21 @@ public class MainActivity extends AppCompatActivity {
         button.setMinimumHeight(dp(ICON_TARGET_DP));
         button.setGravity(Gravity.CENTER);
         button.setPadding(0, 0, 0, 0);
-        button.setCornerRadius(dp(ICON_TARGET_DP / 2f));
+        button.setCornerRadius(dp(4));
         button.setContentDescription(fa(description));
-        button.setBackgroundTintList(android.content.res.ColorStateList.valueOf(Color.rgb(47, 51, 62)));
+        button.setBackgroundTintList(android.content.res.ColorStateList.valueOf(color(R.color.focus_surface_raised)));
         button.setOnClickListener(v -> action.run());
         return button;
     }
 
     private MaterialCardView card() {
         MaterialCardView card = new MaterialCardView(this);
-        card.setRadius(dp(14));
-        card.setCardElevation(dp(1));
-        card.setCardBackgroundColor(Color.rgb(29, 32, 40));
-        card.setStrokeColor(Color.rgb(47, 51, 62));
+        card.setRadius(dp(8));
+        card.setCardElevation(dp(2));
+        card.setCardBackgroundColor(color(R.color.focus_surface));
+        card.setStrokeColor(color(R.color.focus_outline));
         card.setStrokeWidth(dp(1));
+        card.setRippleColor(android.content.res.ColorStateList.valueOf(0x2255B4E5));
         return card;
     }
 
@@ -564,17 +603,22 @@ public class MainActivity extends AppCompatActivity {
         else if ("Focus guard".equals(title)) backAction = this::showPomodoroSettings;
         else backAction = this::buildHome;
         screen = column();
-        screen.setBackgroundColor(Color.rgb(17, 19, 24));
+        screen.setBackgroundColor(color(R.color.focus_background));
         screen.setPadding(dp(16), dp(8), dp(16), dp(12));
-        LinearLayout header = row();
-        MaterialButton back = iconButton(R.drawable.ic_arrow_back, "Back", this::navigateBack);
-        header.addView(back);
-        TextView heading = text(title, 22, Color.WHITE);
-        heading.setTypeface(appTypeface, Typeface.BOLD);
-        LinearLayout.LayoutParams titleParams = new LinearLayout.LayoutParams(0, -2, 1);
-        titleParams.leftMargin = dp(12);
-        header.addView(heading, titleParams);
-        screen.addView(header);
+        MaterialToolbar header = new MaterialToolbar(this);
+        header.setTitle(fa(title));
+        header.setTitleTextColor(Color.WHITE);
+        header.setTitleTextAppearance(this, com.google.android.material.R.style.TextAppearance_MaterialComponents_Headline6);
+        android.graphics.drawable.Drawable backIcon = ContextCompat.getDrawable(this, R.drawable.ic_arrow_back);
+        if (backIcon != null) {
+            backIcon = backIcon.mutate();
+            backIcon.setTint(Color.WHITE);
+            header.setNavigationIcon(backIcon);
+        }
+        header.setNavigationContentDescription(fa("Back"));
+        header.setNavigationOnClickListener(v -> navigateBack());
+        header.setBackgroundColor(Color.TRANSPARENT);
+        screen.addView(header, new LinearLayout.LayoutParams(-1, dp(56)));
         if (body instanceof ScrollView) {
             screen.addView(body, new LinearLayout.LayoutParams(-1, 0, 1));
         } else {
@@ -619,9 +663,11 @@ public class MainActivity extends AppCompatActivity {
         }
         FrameLayout shell = new FrameLayout(this);
         FrameLayout.LayoutParams contentParams = new FrameLayout.LayoutParams(-1, -1);
-        contentParams.bottomMargin = dp(144);
+        boolean homePlayerVisible = "home".equals(activeScreen);
+        contentParams.bottomMargin = dp(homePlayerVisible ? 72 : 144);
         shell.addView(root, contentParams);
         MaterialCardView miniPlayer = miniPlayer();
+        miniPlayer.setVisibility(homePlayerVisible ? View.GONE : View.VISIBLE);
         FrameLayout.LayoutParams miniPlayerParams = new FrameLayout.LayoutParams(-1, dp(64),
                 Gravity.BOTTOM);
         miniPlayerParams.leftMargin = dp(8);
@@ -632,7 +678,7 @@ public class MainActivity extends AppCompatActivity {
         shell.addView(bottomNavigation(), navigationParams);
         ViewCompat.setOnApplyWindowInsetsListener(shell, (view, insets) -> {
             Insets systemBars = insets.getInsets(WindowInsetsCompat.Type.systemBars());
-            contentParams.bottomMargin = dp(144) + systemBars.bottom;
+            contentParams.bottomMargin = dp(homePlayerVisible ? 72 : 144) + systemBars.bottom;
             miniPlayerParams.bottomMargin = dp(76) + systemBars.bottom;
             navigationParams.bottomMargin = systemBars.bottom;
             root.setPadding(left + systemBars.left, top + systemBars.top,
@@ -646,7 +692,7 @@ public class MainActivity extends AppCompatActivity {
 
     private MaterialCardView miniPlayer() {
         MaterialCardView playerCard = card();
-        playerCard.setRadius(dp(16));
+        playerCard.setRadius(dp(8));
         playerCard.setCardElevation(dp(4));
         LinearLayout player = row();
         player.setPadding(dp(8), dp(4), dp(4), dp(4));
@@ -683,60 +729,35 @@ public class MainActivity extends AppCompatActivity {
         return playerCard;
     }
 
-    private LinearLayout bottomNavigation() {
-        LinearLayout navigation = row();
-        navigation.setGravity(Gravity.CENTER);
-        navigation.setBackgroundColor(Color.rgb(24, 26, 33));
+    private BottomNavigationView bottomNavigation() {
+        BottomNavigationView navigation = new BottomNavigationView(this);
+        navigation.inflateMenu(R.menu.bottom_navigation);
+        navigation.setLabelVisibilityMode(BottomNavigationView.LABEL_VISIBILITY_LABELED);
+        navigation.setItemHorizontalTranslationEnabled(false);
+        navigation.setItemIconTintList(ContextCompat.getColorStateList(this, R.color.navigation_item_tint));
+        navigation.setItemTextColor(ContextCompat.getColorStateList(this, R.color.navigation_item_tint));
+        navigation.setItemRippleColor(android.content.res.ColorStateList.valueOf(0x3360B4E6));
+        navigation.setBackgroundColor(color(R.color.focus_navigation));
         navigation.setElevation(dp(8));
-        navigation.setMinimumHeight(dp(72));
-        addNavigationItem(navigation, R.drawable.ic_focus, "تمرکز", "home", this::buildHome);
-        addNavigationItem(navigation, R.drawable.ic_edit, "یادداشت", "Notes", this::showNotes);
-        addNavigationItem(navigation, R.drawable.ic_notifications, "یادآورها", "Reminders", this::showReminders);
-        addNavigationItem(navigation, R.drawable.ic_picture_as_pdf, "PDF", "PDF library", this::showPdfLibrary);
-        addNavigationItem(navigation, R.drawable.ic_music_note, "موسیقی", "Music", this::showMusic);
+        navigation.setSelectedItemId(selectedNavigationItem());
+        navigation.setOnItemSelectedListener(item -> {
+            int id = item.getItemId();
+            if (id == R.id.navigation_home) buildHome();
+            else if (id == R.id.navigation_notes) showNotes();
+            else if (id == R.id.navigation_reminders) showReminders();
+            else if (id == R.id.navigation_pdfs) showPdfLibrary();
+            else if (id == R.id.navigation_music) showMusic();
+            return true;
+        });
         return navigation;
     }
 
-    private void addNavigationItem(LinearLayout parent, int icon, String label, String destination,
-                                   Runnable action) {
-        LinearLayout item = column();
-        item.setGravity(Gravity.CENTER);
-        item.setMinimumHeight(dp(72));
-        item.setPadding(dp(4), 0, dp(4), 0);
-        item.setContentDescription(fa(label));
-        item.setClickable(true);
-        item.setFocusable(true);
-        item.setImportantForAccessibility(View.IMPORTANT_FOR_ACCESSIBILITY_YES);
-        if (Build.VERSION.SDK_INT >= 28) item.setAccessibilityPaneTitle(label);
-        boolean selected = activeScreen.equals(destination)
-                || "home".equals(destination) && activeScreen.equals("home");
-        android.graphics.drawable.GradientDrawable rippleContent = new android.graphics.drawable.GradientDrawable();
-        rippleContent.setColor(Color.TRANSPARENT);
-        rippleContent.setCornerRadius(dp(20));
-        item.setBackground(new android.graphics.drawable.RippleDrawable(
-                android.content.res.ColorStateList.valueOf(0x3360B4E6), rippleContent, null));
-        FrameLayout iconContainer = new FrameLayout(this);
-        android.graphics.drawable.GradientDrawable iconBackground = new android.graphics.drawable.GradientDrawable();
-        iconBackground.setColor(selected ? Color.rgb(38, 40, 51) : Color.TRANSPARENT);
-        iconBackground.setCornerRadius(dp(18));
-        iconContainer.setBackground(iconBackground);
-        LinearLayout.LayoutParams iconContainerParams = new LinearLayout.LayoutParams(dp(60), dp(32));
-        item.addView(iconContainer, iconContainerParams);
-        ImageView iconView = new ImageView(this);
-        iconView.setImageResource(icon);
-        int foreground = selected ? Color.rgb(60, 180, 230) : Color.rgb(178, 182, 193);
-        iconView.setImageTintList(android.content.res.ColorStateList.valueOf(foreground));
-        FrameLayout.LayoutParams iconParams = new FrameLayout.LayoutParams(dp(24), dp(24), Gravity.CENTER);
-        iconContainer.addView(iconView, iconParams);
-        TextView text = text(label, 11, foreground);
-        text.setGravity(Gravity.CENTER);
-        text.setSingleLine(true);
-        text.setEllipsize(android.text.TextUtils.TruncateAt.END);
-        LinearLayout.LayoutParams labelParams = new LinearLayout.LayoutParams(-1, dp(20));
-        labelParams.topMargin = dp(3);
-        item.addView(text, labelParams);
-        item.setOnClickListener(v -> action.run());
-        parent.addView(item, new LinearLayout.LayoutParams(0, dp(72), 1));
+    private int selectedNavigationItem() {
+        if ("Notes".equals(activeScreen) || "Note editor".equals(activeScreen)) return R.id.navigation_notes;
+        if ("Reminders".equals(activeScreen)) return R.id.navigation_reminders;
+        if ("PDF library".equals(activeScreen)) return R.id.navigation_pdfs;
+        if ("Music".equals(activeScreen) || "Queue".equals(activeScreen)) return R.id.navigation_music;
+        return R.id.navigation_home;
     }
 
     private ScrollView scroll(View child) {
@@ -751,21 +772,25 @@ public class MainActivity extends AppCompatActivity {
         activeScreen = "home";
         backAction = null;
         closePdf();
-        setRequestedOrientation(android.content.pm.ActivityInfo.SCREEN_ORIENTATION_UNSPECIFIED);
+        setRequestedOrientation(android.content.pm.ActivityInfo.SCREEN_ORIENTATION_PORTRAIT);
         LinearLayout content = column();
-        content.setPadding(dp(20), dp(20), dp(20), dp(20));
-        LinearLayout brand = row();
-        TextView greeting = text("تمرکز", 13, Color.rgb(60, 180, 230));
-        greeting.setLetterSpacing(0.18f);
-        brand.addView(greeting, new LinearLayout.LayoutParams(0, -2, 1));
+        content.setPadding(dp(16), dp(8), dp(16), dp(16));
+        MaterialToolbar brand = new MaterialToolbar(this);
+        brand.setTitle("تمرکز");
+        brand.setTitleTextColor(color(R.color.focus_on_surface));
+        brand.setTitleTextAppearance(this,
+                com.google.android.material.R.style.TextAppearance_MaterialComponents_Headline6);
+        brand.setBackgroundColor(Color.TRANSPARENT);
         MaterialButton settings = iconButton(R.drawable.ic_settings,
                 "Pomodoro and focus guard settings", this::showPomodoroSettings);
-        brand.addView(settings);
-        content.addView(brand);
+        MaterialToolbar.LayoutParams settingsParams = new MaterialToolbar.LayoutParams(dp(48), dp(48),
+                Gravity.END | Gravity.CENTER_VERTICAL);
+        brand.addView(settings, settingsParams);
+        content.addView(brand, new LinearLayout.LayoutParams(-1, dp(56)));
         TextView title = text("برای کارهای مهم وقت بساز.", 22, Color.WHITE);
         title.setTypeface(appTypeface, Typeface.BOLD);
         LinearLayout.LayoutParams titleMargin = new LinearLayout.LayoutParams(-1, -2);
-        titleMargin.topMargin = dp(6);
+        titleMargin.topMargin = dp(8);
         titleMargin.bottomMargin = dp(14);
         content.addView(title, titleMargin);
         TextView dateLabel = text(todayDateLabel(), 13, Color.LTGRAY);
@@ -804,7 +829,7 @@ public class MainActivity extends AppCompatActivity {
         duration.setOnClickListener(v -> showPomodoroSettings());
         timerContent.setOnClickListener(v -> showPomodoroSettings());
         timerButton = button("");
-        timerButton.setBackgroundTintList(android.content.res.ColorStateList.valueOf(Color.rgb(34, 158, 217)));
+        timerButton.setBackgroundTintList(android.content.res.ColorStateList.valueOf(color(R.color.focus_primary)));
         LinearLayout.LayoutParams startParams = new LinearLayout.LayoutParams(dp(170), dp(52));
         startParams.topMargin = dp(10);
         timerContent.addView(timerButton, startParams);
@@ -816,9 +841,10 @@ public class MainActivity extends AppCompatActivity {
         resetTimer.setIconResource(R.drawable.ic_rotate_right);
         resetTimer.setIconGravity(MaterialButton.ICON_GRAVITY_TEXT_START);
         resetTimer.setIconTint(android.content.res.ColorStateList.valueOf(Color.WHITE));
-        resetTimer.setBackgroundTintList(android.content.res.ColorStateList.valueOf(Color.rgb(47, 51, 62)));
+        resetTimer.setBackgroundTintList(android.content.res.ColorStateList.valueOf(color(R.color.focus_surface_raised)));
+        resetTimer.setTextColor(color(R.color.focus_on_surface));
         resetTimer.setOnClickListener(v -> resetTimer());
-        LinearLayout.LayoutParams resetParams = new LinearLayout.LayoutParams(dp(112), dp(44));
+        LinearLayout.LayoutParams resetParams = new LinearLayout.LayoutParams(dp(112), dp(48));
         resetParams.rightMargin = dp(8);
         resetTimer.setMinHeight(dp(48));
         timerActions.addView(resetTimer, resetParams);
@@ -826,7 +852,8 @@ public class MainActivity extends AppCompatActivity {
         skipTimer.setIconResource(R.drawable.ic_skip_next);
         skipTimer.setIconGravity(MaterialButton.ICON_GRAVITY_TEXT_START);
         skipTimer.setIconTint(android.content.res.ColorStateList.valueOf(Color.WHITE));
-        skipTimer.setBackgroundTintList(android.content.res.ColorStateList.valueOf(Color.rgb(47, 51, 62)));
+        skipTimer.setBackgroundTintList(android.content.res.ColorStateList.valueOf(color(R.color.focus_surface_raised)));
+        skipTimer.setTextColor(color(R.color.focus_on_surface));
         skipTimer.setOnClickListener(v -> skipTimerPhase());
         skipTimer.setMinHeight(dp(48));
         timerActions.addView(skipTimer, new LinearLayout.LayoutParams(dp(112), dp(48)));
@@ -850,7 +877,7 @@ public class MainActivity extends AppCompatActivity {
         addExamTimerCard(content);
         addUpcomingTasks(content);
 
-        TextView shortcutsTitle = text("دسترسی سریع", 12, Color.rgb(60, 180, 230));
+        TextView shortcutsTitle = text("دسترسی سریع", 12, color(R.color.focus_primary));
         shortcutsTitle.setTypeface(appTypeface, Typeface.BOLD);
         shortcutsTitle.setLetterSpacing(0.08f);
         LinearLayout.LayoutParams shortcutsTitleParams = new LinearLayout.LayoutParams(-1, -2);
@@ -873,7 +900,7 @@ public class MainActivity extends AppCompatActivity {
         recentContent.setPadding(dp(15), dp(13), dp(15), dp(13));
         ImageView pdfIcon = new ImageView(this);
         pdfIcon.setImageResource(R.drawable.ic_picture_as_pdf);
-        pdfIcon.setImageTintList(android.content.res.ColorStateList.valueOf(Color.rgb(60, 180, 230)));
+        pdfIcon.setImageTintList(android.content.res.ColorStateList.valueOf(color(R.color.focus_primary)));
         pdfIcon.setContentDescription("PDF");
         pdfIcon.setLayoutParams(new LinearLayout.LayoutParams(dp(24), dp(24)));
         recentContent.addView(pdfIcon);
@@ -889,7 +916,7 @@ public class MainActivity extends AppCompatActivity {
         LinearLayout.LayoutParams recentDetailsParams = new LinearLayout.LayoutParams(0, -2, 1);
         recentDetailsParams.leftMargin = dp(12);
         recentContent.addView(recentDetails, recentDetailsParams);
-        recentContent.addView(text(lastPdfStatus, 12, Color.rgb(60, 180, 230)));
+        recentContent.addView(text(lastPdfStatus, 12, color(R.color.focus_primary)));
         recent.addView(recentContent);
         recent.setMinimumHeight(dp(72));
         recent.setClickable(true);
@@ -934,7 +961,7 @@ public class MainActivity extends AppCompatActivity {
         content.addView(bottom, bottomParams);
 
         ScrollView scroll = scroll(content);
-        scroll.setBackgroundColor(Color.rgb(17, 19, 24));
+        scroll.setBackgroundColor(color(R.color.focus_background));
         setScreenContent(scroll);
         loadSavedPdfs();
         refreshHomePlayer();
@@ -1007,11 +1034,12 @@ public class MainActivity extends AppCompatActivity {
 
     private void addAction(GridLayout parent, HomeShortcut shortcut) {
         MaterialCardView item = new MaterialCardView(this);
-        item.setRadius(dp(16));
+        item.setRadius(dp(8));
         item.setCardElevation(0);
         item.setStrokeWidth(dp(1));
-        item.setStrokeColor(Color.rgb(47, 51, 62));
-        item.setCardBackgroundColor(Color.rgb(29, 32, 40));
+        item.setStrokeColor(color(R.color.focus_outline));
+        item.setCardBackgroundColor(color(R.color.focus_surface));
+        item.setRippleColor(android.content.res.ColorStateList.valueOf(0x2255B4E5));
         item.setClickable(true);
         item.setFocusable(true);
         item.setContentDescription(fa(shortcut.label));
@@ -1031,7 +1059,7 @@ public class MainActivity extends AppCompatActivity {
             }
         }
         if (shortcut.packageName == null) {
-            glyph.setImageTintList(android.content.res.ColorStateList.valueOf(Color.rgb(60, 180, 230)));
+            glyph.setImageTintList(android.content.res.ColorStateList.valueOf(color(R.color.focus_primary)));
         }
         glyph.setImportantForAccessibility(View.IMPORTANT_FOR_ACCESSIBILITY_NO);
         content.addView(glyph, new LinearLayout.LayoutParams(dp(22), dp(22)));
@@ -1142,7 +1170,7 @@ public class MainActivity extends AppCompatActivity {
     private android.graphics.drawable.Drawable makeArtworkBackground() {
         android.graphics.drawable.GradientDrawable drawable = new android.graphics.drawable.GradientDrawable(
                 android.graphics.drawable.GradientDrawable.Orientation.TL_BR,
-                new int[]{Color.rgb(34, 158, 217), Color.rgb(55, 177, 161)});
+                new int[]{color(R.color.focus_primary), color(R.color.focus_secondary)});
         drawable.setCornerRadius(dp(8));
         return drawable;
     }
@@ -1387,8 +1415,7 @@ public class MainActivity extends AppCompatActivity {
         labels.addView(text(title, 14, Color.WHITE));
         labels.addView(text(description, 11, Color.LTGRAY));
         row.addView(labels, new LinearLayout.LayoutParams(0, -2, 1));
-        android.widget.Switch control = new android.widget.Switch(this);
-        control.setShowText(false);
+        MaterialSwitch control = new MaterialSwitch(this);
         control.setChecked(initialValue);
         control.setContentDescription(title);
         control.setOnCheckedChangeListener((button, checked) -> {
@@ -1429,9 +1456,10 @@ public class MainActivity extends AppCompatActivity {
     }
 
     private void addSettingsField(LinearLayout body, TextInputEditText field) {
-        LinearLayout.LayoutParams params = new LinearLayout.LayoutParams(-1, dp(54));
+        TextInputLayout container = inputContainer(field, String.valueOf(field.getHint()));
+        LinearLayout.LayoutParams params = new LinearLayout.LayoutParams(-1, -2);
         params.topMargin = dp(6);
-        body.addView(field, params);
+        body.addView(container, params);
     }
 
     private int parseSetting(TextInputEditText field, int minimum, int maximum) {
@@ -1556,7 +1584,7 @@ public class MainActivity extends AppCompatActivity {
             MaterialCardView noteCard = card();
             LinearLayout noteContent = column();
             noteContent.setPadding(dp(16), dp(14), dp(16), dp(14));
-            TextView dateTitle = text(prettyDate(date), 14, Color.rgb(60, 180, 230));
+            TextView dateTitle = text(prettyDate(date), 14, color(R.color.focus_primary));
             dateTitle.setTypeface(appTypeface, Typeface.BOLD);
             noteContent.addView(dateTitle);
             String note = prefs.getString(noteKey(date), "");
@@ -1571,7 +1599,7 @@ public class MainActivity extends AppCompatActivity {
             taskTitle.setTypeface(appTypeface, Typeface.BOLD);
             taskHeader.addView(taskTitle, new LinearLayout.LayoutParams(0, -2, 1));
             MaterialButton addTask = button("+ کار");
-            addTask.setMinHeight(dp(40));
+            addTask.setMinHeight(dp(48));
             addTask.setOnClickListener(v -> showTaskEditor(date, null));
             taskHeader.addView(addTask);
             noteContent.addView(taskHeader);
@@ -1625,21 +1653,16 @@ public class MainActivity extends AppCompatActivity {
     private void showNoteEditor(String date) {
         LinearLayout editorScreen = column();
         editorScreen.setPadding(dp(4), dp(8), dp(4), dp(12));
-        TextView dateLabel = text(prettyDate(date), 13, Color.rgb(60, 180, 230));
+        TextView dateLabel = text(prettyDate(date), 13, color(R.color.focus_primary));
         editorScreen.addView(dateLabel);
         TextInputEditText editor = new TextInputEditText(this);
-        editor.setTextColor(Color.WHITE);
-        editor.setHintTextColor(Color.GRAY);
         editor.setHint("برنامه، ایده یا یادداشت روزتان را بنویسید…");
-        if (appTypeface != null) editor.setTypeface(appTypeface);
         editor.setMinLines(8);
         editor.setGravity(Gravity.TOP);
-        editor.setPadding(dp(14), dp(14), dp(14), dp(14));
-        editor.setBackgroundTintList(android.content.res.ColorStateList.valueOf(Color.rgb(34, 158, 217)));
         editor.setText(prefs.getString(noteKey(date), ""));
         LinearLayout.LayoutParams editorParams = new LinearLayout.LayoutParams(-1, 0, 1);
         editorParams.topMargin = dp(8);
-        editorScreen.addView(editor, editorParams);
+        editorScreen.addView(inputContainer(editor, "یادداشت روزانه"), editorParams);
         TextView savedStatus = text("تغییرات به‌صورت خودکار ذخیره می‌شوند", 12, Color.LTGRAY);
         LinearLayout.LayoutParams statusParams = new LinearLayout.LayoutParams(-1, -2);
         statusParams.topMargin = dp(8);
@@ -1807,19 +1830,15 @@ public class MainActivity extends AppCompatActivity {
         TextInputEditText title = new TextInputEditText(this);
         title.setSingleLine(true);
         title.setHint("عنوان کار");
-        title.setTextColor(Color.WHITE);
-        title.setHintTextColor(Color.GRAY);
-        if (appTypeface != null) title.setTypeface(appTypeface);
         if (existing != null) title.setText(existing.title);
-        form.addView(title, new LinearLayout.LayoutParams(-1, dp(56)));
+        form.addView(inputContainer(title, "عنوان کار"), new LinearLayout.LayoutParams(-1, -2));
         TextInputEditText details = new TextInputEditText(this);
         details.setHint("توضیحات (اختیاری)");
-        details.setTextColor(Color.WHITE);
-        details.setHintTextColor(Color.GRAY);
         details.setMinLines(2);
-        if (appTypeface != null) details.setTypeface(appTypeface);
         if (existing != null) details.setText(existing.details);
-        form.addView(details, new LinearLayout.LayoutParams(-1, dp(76)));
+        LinearLayout.LayoutParams detailParams = new LinearLayout.LayoutParams(-1, -2);
+        detailParams.topMargin = dp(8);
+        form.addView(inputContainer(details, "توضیحات (اختیاری)"), detailParams);
 
         Calendar due = Calendar.getInstance();
         due.add(Calendar.HOUR_OF_DAY, 1);
@@ -1918,8 +1937,8 @@ public class MainActivity extends AppCompatActivity {
         for (PlannerTask task : tasks) {
             String taskDate = task.noteDate == null ? noteDate : task.noteDate;
             LinearLayout item = row();
-            CheckBox checkBox = new CheckBox(this);
-            checkBox.setButtonTintList(android.content.res.ColorStateList.valueOf(Color.rgb(60, 180, 230)));
+            MaterialCheckBox checkBox = new MaterialCheckBox(this);
+            checkBox.setButtonTintList(android.content.res.ColorStateList.valueOf(color(R.color.focus_primary)));
             checkBox.setChecked(task.done);
             item.addView(checkBox, new LinearLayout.LayoutParams(dp(42), dp(48)));
             LinearLayout details = column();
@@ -1934,7 +1953,7 @@ public class MainActivity extends AppCompatActivity {
                     ? "عقب‌افتاده · " + formatDateTime(task.dueAt)
                     : "مهلت · " + formatDateTime(task.dueAt);
             details.addView(text(dueText, 11, task.dueAt < System.currentTimeMillis()
-                    && !task.done ? Color.rgb(255, 130, 110) : Color.LTGRAY));
+                    && !task.done ? color(R.color.focus_error) : color(R.color.focus_on_surface_muted)));
             item.addView(details, new LinearLayout.LayoutParams(0, -2, 1));
             checkBox.setOnCheckedChangeListener((button, checked) -> {
                 task.done = checked;
@@ -2033,7 +2052,7 @@ public class MainActivity extends AppCompatActivity {
         details.addView(examHomeSummary, summaryParams);
         content.addView(details, new LinearLayout.LayoutParams(0, -2, 1));
         MaterialButton open = button(examRunning ? "مدیریت" : "تنظیم");
-        open.setMinHeight(dp(42));
+        open.setMinHeight(dp(48));
         open.setOnClickListener(v -> showExamTimer());
         content.addView(open);
         card.addView(content);
@@ -2057,25 +2076,19 @@ public class MainActivity extends AppCompatActivity {
         content.addView(description);
         TextInputEditText title = new TextInputEditText(this);
         title.setSingleLine(true);
-        title.setTextColor(Color.WHITE);
-        title.setHintTextColor(Color.GRAY);
         title.setHint("نام آزمون");
         title.setText(examTitle);
-        if (appTypeface != null) title.setTypeface(appTypeface);
-        LinearLayout.LayoutParams titleParams = new LinearLayout.LayoutParams(-1, dp(54));
+        LinearLayout.LayoutParams titleParams = new LinearLayout.LayoutParams(-1, -2);
         titleParams.topMargin = dp(12);
-        content.addView(title, titleParams);
+        content.addView(inputContainer(title, "نام آزمون"), titleParams);
         TextInputEditText duration = new TextInputEditText(this);
         duration.setSingleLine(true);
         duration.setInputType(android.text.InputType.TYPE_CLASS_NUMBER);
-        duration.setTextColor(Color.WHITE);
-        duration.setHintTextColor(Color.GRAY);
         duration.setHint("مدت آزمون به دقیقه");
         duration.setText(String.valueOf(examDurationMillis / 60_000L));
-        if (appTypeface != null) duration.setTypeface(appTypeface);
-        LinearLayout.LayoutParams durationParams = new LinearLayout.LayoutParams(-1, dp(54));
+        LinearLayout.LayoutParams durationParams = new LinearLayout.LayoutParams(-1, -2);
         durationParams.topMargin = dp(8);
-        content.addView(duration, durationParams);
+        content.addView(inputContainer(duration, "مدت آزمون به دقیقه"), durationParams);
         FrameLayout clock = new FrameLayout(this);
         examProgress = new TimerProgressView();
         clock.addView(examProgress, new FrameLayout.LayoutParams(dp(220), dp(220), Gravity.CENTER));
@@ -2242,7 +2255,7 @@ public class MainActivity extends AppCompatActivity {
             details.addView(text(reminder.optString("title"), 14, Color.WHITE));
             String description = reminder.optString("details");
             if (!description.isEmpty()) details.addView(text(description, 12, Color.LTGRAY));
-            details.addView(text(formatDateTime(reminder.optLong("at")), 11, Color.rgb(60, 180, 230)));
+            details.addView(text(formatDateTime(reminder.optLong("at")), 11, color(R.color.focus_primary)));
             row.addView(details, new LinearLayout.LayoutParams(0, -2, 1));
             MaterialButton remove = iconButton(R.drawable.ic_close, "حذف یادآور", () -> {
                 JSONArray current = loadReminders();
@@ -2279,17 +2292,13 @@ public class MainActivity extends AppCompatActivity {
         TextInputEditText title = new TextInputEditText(this);
         title.setSingleLine(true);
         title.setHint("عنوان یادآوری");
-        title.setTextColor(Color.WHITE);
-        title.setHintTextColor(Color.GRAY);
-        if (appTypeface != null) title.setTypeface(appTypeface);
-        form.addView(title, new LinearLayout.LayoutParams(-1, dp(56)));
+        form.addView(inputContainer(title, "عنوان یادآوری"), new LinearLayout.LayoutParams(-1, -2));
         TextInputEditText details = new TextInputEditText(this);
         details.setHint("توضیحات");
-        details.setTextColor(Color.WHITE);
-        details.setHintTextColor(Color.GRAY);
         details.setMinLines(2);
-        if (appTypeface != null) details.setTypeface(appTypeface);
-        form.addView(details, new LinearLayout.LayoutParams(-1, dp(76)));
+        LinearLayout.LayoutParams detailsParams = new LinearLayout.LayoutParams(-1, -2);
+        detailsParams.topMargin = dp(8);
+        form.addView(inputContainer(details, "توضیحات"), detailsParams);
         Calendar when = Calendar.getInstance();
         when.add(Calendar.HOUR_OF_DAY, 1);
         TextView whenLabel = text(formatDateTime(when.getTimeInMillis()), 12, Color.LTGRAY);
@@ -2381,7 +2390,7 @@ public class MainActivity extends AppCompatActivity {
 
         LinearLayout libraryActions = row();
         MaterialButton add = button("+ Add files");
-        add.setMinHeight(dp(42));
+        add.setMinHeight(dp(48));
         add.setOnClickListener(v -> {
             Intent intent = new Intent(Intent.ACTION_OPEN_DOCUMENT);
             intent.addCategory(Intent.CATEGORY_OPENABLE);
@@ -2389,20 +2398,20 @@ public class MainActivity extends AppCompatActivity {
             intent.addFlags(Intent.FLAG_GRANT_READ_URI_PERMISSION | Intent.FLAG_GRANT_PERSISTABLE_URI_PERMISSION);
             startActivityForResult(intent, REQUEST_AUDIO);
         });
-        libraryActions.addView(add, new LinearLayout.LayoutParams(0, dp(42), 1));
+        libraryActions.addView(add, new LinearLayout.LayoutParams(0, dp(48), 1));
         MaterialButton queueButton = button("Queue " + queue.size());
         queueButton.setIconResource(R.drawable.ic_queue_music);
-        queueButton.setIconTint(android.content.res.ColorStateList.valueOf(Color.WHITE));
+        queueButton.setIconTint(android.content.res.ColorStateList.valueOf(color(R.color.focus_background)));
         queueButton.setMinHeight(dp(48));
         queueButton.setContentDescription("Open playback queue with " + queue.size() + " tracks");
         queueButton.setOnClickListener(v -> showQueue());
-        LinearLayout.LayoutParams queueParams = new LinearLayout.LayoutParams(0, dp(42), 1);
+        LinearLayout.LayoutParams queueParams = new LinearLayout.LayoutParams(0, dp(48), 1);
         queueParams.leftMargin = dp(8);
         libraryActions.addView(queueButton, queueParams);
         list.addView(libraryActions);
         if (tracks.isEmpty()) {
             MaterialButton scan = button("Load device music library");
-            LinearLayout.LayoutParams scanParams = new LinearLayout.LayoutParams(-1, dp(42));
+            LinearLayout.LayoutParams scanParams = new LinearLayout.LayoutParams(-1, dp(48));
             scanParams.topMargin = dp(6);
             list.addView(scan, scanParams);
             scan.setOnClickListener(v -> {
@@ -2426,10 +2435,9 @@ public class MainActivity extends AppCompatActivity {
         musicSearch.setCompoundDrawablesWithIntrinsicBounds(searchIcon, null, null, null);
         musicSearch.setCompoundDrawablePadding(dp(8));
         musicSearch.setPadding(dp(12), dp(4), dp(12), dp(4));
-        musicSearch.setBackgroundTintList(android.content.res.ColorStateList.valueOf(Color.rgb(60, 65, 78)));
-        LinearLayout.LayoutParams searchParams = new LinearLayout.LayoutParams(-1, dp(46));
+        LinearLayout.LayoutParams searchParams = new LinearLayout.LayoutParams(-1, -2);
         searchParams.topMargin = dp(9);
-        list.addView(musicSearch, searchParams);
+        list.addView(inputContainer(musicSearch, ""), searchParams);
 
         HorizontalScrollView albumScroller = new HorizontalScrollView(this);
         albumScroller.setHorizontalScrollBarEnabled(false);
@@ -2442,7 +2450,7 @@ public class MainActivity extends AppCompatActivity {
             chip.setMinHeight(dp(48));
             chip.setTextSize(11);
             chip.setOnClickListener(v -> musicSearch.setText(album));
-            LinearLayout.LayoutParams chipParams = new LinearLayout.LayoutParams(-2, dp(36));
+            LinearLayout.LayoutParams chipParams = new LinearLayout.LayoutParams(-2, dp(48));
             chipParams.rightMargin = dp(6);
             albumChips.addView(chip, chipParams);
         }
@@ -2553,12 +2561,12 @@ public class MainActivity extends AppCompatActivity {
         if (matches == 0) target.addView(text("No matching tracks.", 12, Color.LTGRAY));
         else if (matches > rendered) {
             MaterialButton loadMore = button("Load more");
-            loadMore.setMinHeight(dp(44));
+            loadMore.setMinHeight(dp(48));
             loadMore.setOnClickListener(v -> {
                 visibleTrackCount += LIBRARY_PAGE_SIZE;
                 renderTrackRows(target, query);
             });
-            LinearLayout.LayoutParams moreParams = new LinearLayout.LayoutParams(-1, dp(44));
+            LinearLayout.LayoutParams moreParams = new LinearLayout.LayoutParams(-1, dp(48));
             moreParams.topMargin = dp(8);
             target.addView(loadMore, moreParams);
         }
@@ -3115,8 +3123,6 @@ public class MainActivity extends AppCompatActivity {
             playerPlayButton.setIconResource(playing ? R.drawable.ic_pause : R.drawable.ic_play_arrow);
             playerPlayButton.setContentDescription(playing ? "Pause music" : "Play music");
         }
-        if (readerPlayerLabel != null) readerPlayerLabel.setText(getString(
-                R.string.track_artist_status, currentTrackTitle(), currentTrackArtist()));
         if (readerPlayerButton != null) {
             boolean playing = isAudioPlaying();
             readerPlayerButton.setIconResource(playing ? R.drawable.ic_pause : R.drawable.ic_play_arrow);
@@ -3150,15 +3156,15 @@ public class MainActivity extends AppCompatActivity {
         LinearLayout actions = row();
         MaterialButton add = button("Add PDF");
         add.setIconResource(R.drawable.ic_add);
-        add.setIconTint(android.content.res.ColorStateList.valueOf(Color.WHITE));
+        add.setIconTint(android.content.res.ColorStateList.valueOf(color(R.color.focus_background)));
         add.setMinHeight(dp(48));
         add.setContentDescription("Add PDF document");
         add.setOnClickListener(v -> pickPdf());
-        actions.addView(add, new LinearLayout.LayoutParams(0, dp(42), 1));
+        actions.addView(add, new LinearLayout.LayoutParams(0, dp(48), 1));
         MaterialButton scan = button(scanningPdfs ? "Scanning…" : "Scan folder");
         scan.setMinHeight(dp(48));
         scan.setEnabled(!scanningPdfs);
-        LinearLayout.LayoutParams scanParams = new LinearLayout.LayoutParams(0, dp(42), 1);
+        LinearLayout.LayoutParams scanParams = new LinearLayout.LayoutParams(0, dp(48), 1);
         scanParams.leftMargin = dp(8);
         actions.addView(scan, scanParams);
         scan.setOnClickListener(v -> {
@@ -3204,10 +3210,11 @@ public class MainActivity extends AppCompatActivity {
             int pageCount = prefs.getInt("pdf_pages:" + pdf.uri, 0);
             if (hasProgress && pageCount > 0) {
                 progress.setText(getString(R.string.pdf_page_progress, savedPage + 1, pageCount));
-                ProgressBar progressBar = new ProgressBar(this, null, android.R.attr.progressBarStyleHorizontal);
+                LinearProgressIndicator progressBar = new LinearProgressIndicator(this);
                 progressBar.setMax(100);
                 progressBar.setProgress(Math.min(100, (savedPage + 1) * 100 / pageCount));
-                progressBar.setProgressTintList(android.content.res.ColorStateList.valueOf(Color.rgb(34, 158, 217)));
+                progressBar.setIndicatorColor(color(R.color.focus_primary));
+                progressBar.setTrackColor(color(R.color.focus_outline));
                 LinearLayout.LayoutParams barParams = new LinearLayout.LayoutParams(-1, dp(3));
                 barParams.topMargin = dp(5);
                 textDetails.addView(progressBar, barParams);
@@ -3248,12 +3255,12 @@ public class MainActivity extends AppCompatActivity {
         }
         if (pdfs.size() > displayedPdfs) {
             MaterialButton loadMore = button("Load more");
-            loadMore.setMinHeight(dp(44));
+            loadMore.setMinHeight(dp(48));
             loadMore.setOnClickListener(v -> {
                 visiblePdfCount += LIBRARY_PAGE_SIZE;
                 showPdfLibrary();
             });
-            LinearLayout.LayoutParams moreParams = new LinearLayout.LayoutParams(-1, dp(44));
+            LinearLayout.LayoutParams moreParams = new LinearLayout.LayoutParams(-1, dp(48));
             moreParams.topMargin = dp(8);
             list.addView(loadMore, moreParams);
         }
@@ -3582,12 +3589,11 @@ public class MainActivity extends AppCompatActivity {
         activePdf = pdf;
         prefs.edit().putString("last_pdf_uri", pdf.uri.toString()).apply();
         currentPage = Math.max(0, prefs.getInt("pdf_page:" + pdf.uri, 0));
-        pageRotated = Build.VERSION.SDK_INT <= Build.VERSION_CODES.N_MR1
-                || prefs.getBoolean("pdf_rotate:" + pdf.uri, false);
+        readerPortrait = false;
         readerControlsVisible = true;
         setRequestedOrientation(android.content.pm.ActivityInfo.SCREEN_ORIENTATION_LANDSCAPE);
         readerRoot = new FrameLayout(this);
-        readerRoot.setBackgroundColor(Color.rgb(17, 19, 24));
+        readerRoot.setBackgroundColor(color(R.color.focus_background));
         LinearLayout reader = column();
         reader.setPadding(dp(8), dp(6), dp(8), dp(8));
         readerControls = row();
@@ -3596,89 +3602,40 @@ public class MainActivity extends AppCompatActivity {
         readerNavbar = new HorizontalScrollView(this);
         readerNavbar.setHorizontalScrollBarEnabled(false);
         readerNavbar.setFillViewport(false);
-        readerNavbar.setBackgroundColor(Color.rgb(29, 32, 40));
+        readerNavbar.setBackgroundColor(color(R.color.focus_surface));
         readerNavbar.setElevation(dp(3));
         readerNavbar.addView(readerControls);
+        TextView readerTitle = text(pdf.title, 14, Color.WHITE);
+        readerTitle.setSingleLine(true);
+        readerTitle.setEllipsize(android.text.TextUtils.TruncateAt.MIDDLE);
+        LinearLayout.LayoutParams readerTitleParams = new LinearLayout.LayoutParams(dp(148), dp(48));
+        readerTitleParams.leftMargin = dp(8);
+        readerControls.addView(readerTitle, readerTitleParams);
         readerTimerLabel = text("", 12, Color.WHITE);
         readerControls.addView(readerTimerLabel);
         readerTimerButton = iconButton(timerRunning ? R.drawable.ic_pause : R.drawable.ic_play_arrow,
                 timerRunning ? "Pause Pomodoro timer" : "Start Pomodoro timer", this::toggleTimer);
         readerControls.addView(readerTimerButton);
-        readerPreviousButton = iconButton(R.drawable.ic_arrow_back, "Previous PDF page",
-                () -> renderPage(currentPage - 1));
-        readerControls.addView(readerPreviousButton);
-        readerPageLabel = text("", 12, Color.LTGRAY);
-        readerPageLabel.setGravity(Gravity.CENTER);
-        readerPageLabel.setMaxWidth(dp(150));
-        readerPageLabel.setSingleLine(true);
-        readerPageLabel.setEllipsize(android.text.TextUtils.TruncateAt.END);
-        readerControls.addView(readerPageLabel);
-        readerPageSeekBar = new SeekBar(this);
-        readerPageSeekBar.setMax(0);
-        readerPageSeekBar.setProgressTintList(android.content.res.ColorStateList.valueOf(Color.rgb(34, 158, 217)));
-        readerPageSeekBar.setThumbTintList(android.content.res.ColorStateList.valueOf(Color.rgb(85, 196, 161)));
-        readerPageSeekBar.setContentDescription("Navigate PDF pages");
-        readerPageSeekBar.setOnSeekBarChangeListener(new SeekBar.OnSeekBarChangeListener() {
-            @Override public void onProgressChanged(SeekBar seekBar, int progress, boolean fromUser) { }
-            @Override public void onStartTrackingTouch(SeekBar seekBar) { }
-            @Override public void onStopTrackingTouch(SeekBar seekBar) {
-                renderPage(seekBar.getProgress());
-            }
-        });
-        readerControls.addView(readerPageSeekBar, new LinearLayout.LayoutParams(dp(104), dp(48)));
-        TextInputEditText pageJump = new TextInputEditText(this);
-        pageJump.setInputType(android.text.InputType.TYPE_CLASS_NUMBER);
-        pageJump.setSingleLine(true);
-        pageJump.setTextSize(12);
-        pageJump.setTextColor(Color.WHITE);
-        pageJump.setHint(fa("Page"));
-        pageJump.setHintTextColor(Color.GRAY);
-        pageJump.setMinWidth(dp(64));
-        pageJump.setImeOptions(android.view.inputmethod.EditorInfo.IME_ACTION_GO);
-        pageJump.setOnEditorActionListener((view, actionId, event) -> {
-            if (actionId == android.view.inputmethod.EditorInfo.IME_ACTION_GO
-                    || event != null && event.getKeyCode() == android.view.KeyEvent.KEYCODE_ENTER) {
-                try {
-                    int requestedPage = Integer.parseInt(String.valueOf(view.getText())) - 1;
-                    if (requestedPage >= 0 && requestedPage < pdfPageCount) {
-                        renderPage(requestedPage);
-                    } else {
-                        Toast.makeText(this, "Enter a page from 1 to "
-                                + pdfPageCount, Toast.LENGTH_SHORT).show();
-                    }
-                } catch (NumberFormatException ignored) {
-                    Toast.makeText(this, "Enter a valid page number", Toast.LENGTH_SHORT).show();
-                }
-                return true;
-            }
-            return false;
-        });
-        readerControls.addView(pageJump, new LinearLayout.LayoutParams(dp(72), dp(44)));
-        readerPlayerLabel = text(currentTrackTitle(), 12, Color.WHITE);
-        readerPlayerLabel.setMaxWidth(dp(130));
-        readerPlayerLabel.setSingleLine(true);
-        readerPlayerLabel.setEllipsize(android.text.TextUtils.TruncateAt.END);
-        readerControls.addView(readerPlayerLabel);
         readerPlayerButton = iconButton(isAudioPlaying() ? R.drawable.ic_pause : R.drawable.ic_play_arrow,
                 isAudioPlaying() ? "Pause music" : "Play music", this::togglePlayback);
         readerControls.addView(readerPlayerButton);
-        readerNextButton = iconButton(R.drawable.ic_arrow_forward, "Next PDF page",
-                () -> renderPage(currentPage + 1));
-        readerControls.addView(readerNextButton);
-        MaterialButton rotate = iconButton(R.drawable.ic_rotate_right, "Rotate PDF page", () -> {
-            pageRotated = !pageRotated;
-            prefs.edit().putBoolean("pdf_rotate:" + activePdf.uri, pageRotated).apply();
-            renderPage(currentPage);
-        });
-        readerControls.addView(rotate);
+        readerOrientationButton = iconButton(R.drawable.ic_rotate_right, "Switch to portrait reader",
+                this::toggleReaderOrientation);
+        readerControls.addView(readerOrientationButton);
         MaterialButton addTime = iconButton(R.drawable.ic_add, "Add five minutes to the focus timer",
                 this::addFiveMinutes);
         readerControls.addView(addTime);
+        MaterialButton closeReader = iconButton(R.drawable.ic_close, "Close PDF reader", this::buildHome);
+        readerControls.addView(closeReader);
         MaterialButton hide = iconButton(R.drawable.ic_visibility_off, "Hide reader controls",
                 this::toggleReaderControls);
         readerControls.addView(hide);
-        reader.addView(readerNavbar, new LinearLayout.LayoutParams(-1, dp(56)));
-        pdfLoading = new ProgressBar(this);
+        reader.addView(readerNavbar, new LinearLayout.LayoutParams(-1, dp(52)));
+        pdfLoading = new CircularProgressIndicator(this);
+        pdfLoading.setIndicatorSize(dp(36));
+        pdfLoading.setTrackThickness(dp(3));
+        pdfLoading.setIndicatorColor(color(R.color.focus_primary));
+        pdfLoading.setTrackColor(color(R.color.focus_outline));
         LinearLayout.LayoutParams loadingParams = new LinearLayout.LayoutParams(dp(40), dp(40));
         loadingParams.gravity = Gravity.CENTER_HORIZONTAL;
         loadingParams.topMargin = dp(16);
@@ -3687,6 +3644,66 @@ public class MainActivity extends AppCompatActivity {
         pdfImage.setVisibility(View.GONE);
         LinearLayout.LayoutParams imageParams = new LinearLayout.LayoutParams(-1, 0, 1);
         reader.addView(pdfImage, imageParams);
+        readerPageLabel = text("", 12, Color.LTGRAY);
+        readerPageLabel.setGravity(Gravity.CENTER);
+        readerPageLabel.setSingleLine(true);
+        readerPageSlider = new Slider(this);
+        readerPageSlider.setValueFrom(0);
+        readerPageSlider.setValueTo(1);
+        readerPageSlider.setStepSize(1);
+        readerPageSlider.setValue(0);
+        readerPageSlider.setContentDescription("Navigate PDF pages");
+        readerPageSlider.addOnChangeListener((slider, value, fromUser) -> {
+            if (fromUser) setReaderPageLabel(Math.round(value));
+        });
+        readerPageSlider.addOnSliderTouchListener(new Slider.OnSliderTouchListener() {
+            @Override public void onStartTrackingTouch(Slider slider) { }
+            @Override public void onStopTrackingTouch(Slider slider) {
+                renderPage(Math.min(pdfPageCount - 1, Math.round(slider.getValue())));
+            }
+        });
+        readerPreviousButton = iconButton(R.drawable.ic_arrow_back, "Previous PDF page",
+                () -> renderPage(currentPage - 1));
+        readerNextButton = iconButton(R.drawable.ic_arrow_forward, "Next PDF page",
+                () -> renderPage(currentPage + 1));
+        TextInputEditText pageJump = new TextInputEditText(this);
+        pageJump.setInputType(android.text.InputType.TYPE_CLASS_NUMBER);
+        pageJump.setSingleLine(true);
+        pageJump.setTextSize(12);
+        pageJump.setTextColor(Color.WHITE);
+        pageJump.setHint(fa("Page"));
+        pageJump.setHintTextColor(Color.GRAY);
+        pageJump.setMinWidth(dp(56));
+        pageJump.setImeOptions(android.view.inputmethod.EditorInfo.IME_ACTION_GO);
+        pageJump.setOnEditorActionListener((view, actionId, event) -> {
+            if (actionId == android.view.inputmethod.EditorInfo.IME_ACTION_GO
+                    || event != null && event.getKeyCode() == android.view.KeyEvent.KEYCODE_ENTER) {
+                try {
+                    int requestedPage = Integer.parseInt(String.valueOf(view.getText())) - 1;
+                    if (requestedPage >= 0 && requestedPage < pdfPageCount) renderPage(requestedPage);
+                    else Toast.makeText(this, "Enter a page from 1 to "
+                            + pdfPageCount, Toast.LENGTH_SHORT).show();
+                } catch (NumberFormatException ignored) {
+                    Toast.makeText(this, "Enter a valid page number", Toast.LENGTH_SHORT).show();
+                }
+                return true;
+            }
+            return false;
+        });
+        LinearLayout pageNavigation = row();
+        pageNavigation.setPadding(dp(4), dp(2), dp(4), dp(2));
+        pageNavigation.addView(readerPreviousButton, new LinearLayout.LayoutParams(dp(48), dp(48)));
+        pageNavigation.addView(readerPageLabel, new LinearLayout.LayoutParams(dp(88), dp(48)));
+        pageNavigation.addView(readerPageSlider, new LinearLayout.LayoutParams(0, dp(48), 1));
+        pageNavigation.addView(readerNextButton, new LinearLayout.LayoutParams(dp(48), dp(48)));
+        pageNavigation.addView(inputContainer(pageJump, "Page"),
+                new LinearLayout.LayoutParams(dp(72), dp(64)));
+        MaterialCardView pageNavigationCard = card();
+        pageNavigationCard.setRadius(dp(8));
+        pageNavigationCard.addView(pageNavigation);
+        LinearLayout.LayoutParams pageNavigationParams = new LinearLayout.LayoutParams(-1, dp(68));
+        pageNavigationParams.topMargin = dp(4);
+        reader.addView(pageNavigationCard, pageNavigationParams);
         readerRoot.addView(reader);
         MaterialButton show = iconButton(R.drawable.ic_visibility, "Show reader controls", this::toggleReaderControls);
         FrameLayout.LayoutParams showParams = new FrameLayout.LayoutParams(dp(48), dp(48),
@@ -3831,7 +3848,6 @@ public class MainActivity extends AppCompatActivity {
             return;
         }
         int requestId = pdfRenderRequestId.incrementAndGet();
-        boolean rotate = pageRotated;
         Uri pdfUri = activePdf == null ? null : activePdf.uri;
         pdfExecutor.execute(() -> {
             Bitmap display = null;
@@ -3845,13 +3861,6 @@ public class MainActivity extends AppCompatActivity {
                     display = original;
                     original.eraseColor(Color.WHITE);
                     page.render(original, null, null, PdfRenderer.Page.RENDER_MODE_FOR_DISPLAY);
-                    if (rotate) {
-                        Matrix matrix = new Matrix();
-                        matrix.postRotate(90);
-                        display = Bitmap.createBitmap(original, 0, 0, original.getWidth(),
-                                original.getHeight(), matrix, true);
-                        if (display != original) original.recycle();
-                    }
                 }
                 Bitmap renderedBitmap = display;
                 runOnUiThread(() -> {
@@ -3895,18 +3904,8 @@ public class MainActivity extends AppCompatActivity {
             original = Bitmap.createBitmap(width, height, Bitmap.Config.ARGB_8888);
             original.eraseColor(Color.WHITE);
             page.render(original, null, null, PdfRenderer.Page.RENDER_MODE_FOR_DISPLAY);
-            Bitmap display = original;
-            if (pageRotated) {
-                Matrix matrix = new Matrix();
-                matrix.postRotate(90);
-                display = Bitmap.createBitmap(original, 0, 0, original.getWidth(),
-                        original.getHeight(), matrix, true);
-                if (display != original) {
-                    original.recycle();
-                    original = null;
-                }
-            }
-            pdfImage.setBitmap(display);
+            pdfImage.setBitmap(original);
+            original = null;
             pdfImage.setVisibility(View.VISIBLE);
             if (pdfLoading != null) pdfLoading.setVisibility(View.GONE);
             updateReaderPageNavigation(pageNumber);
@@ -3928,17 +3927,33 @@ public class MainActivity extends AppCompatActivity {
     }
 
     private void updateReaderPageNavigation(int pageNumber) {
-        String title = activePdf == null ? "" : activePdf.title;
-        if (readerPageLabel != null) {
-            readerPageLabel.setText(getString(R.string.pdf_page_status,
-                    title, pageNumber + 1, pdfPageCount));
+        if (readerPageSlider != null) {
+            readerPageSlider.setValueTo(Math.max(1, pdfPageCount - 1));
+            readerPageSlider.setValue(Math.min(pageNumber, Math.max(1, pdfPageCount - 1)));
+            readerPageSlider.setEnabled(pdfPageCount > 1);
         }
-        if (readerPageSeekBar != null) {
-            readerPageSeekBar.setMax(Math.max(0, pdfPageCount - 1));
-            readerPageSeekBar.setProgress(pageNumber);
-        }
+        setReaderPageLabel(pageNumber);
         if (readerPreviousButton != null) readerPreviousButton.setEnabled(pageNumber > 0);
         if (readerNextButton != null) readerNextButton.setEnabled(pageNumber < pdfPageCount - 1);
+    }
+
+    private void setReaderPageLabel(int pageNumber) {
+        if (readerPageLabel != null && pdfPageCount > 0) {
+            readerPageLabel.setText(getString(R.string.pdf_page_progress,
+                    Math.max(1, pageNumber + 1), pdfPageCount));
+        }
+    }
+
+    @SuppressLint("SourceLockedOrientationActivity")
+    private void toggleReaderOrientation() {
+        readerPortrait = !readerPortrait;
+        setRequestedOrientation(readerPortrait
+                ? android.content.pm.ActivityInfo.SCREEN_ORIENTATION_PORTRAIT
+                : android.content.pm.ActivityInfo.SCREEN_ORIENTATION_LANDSCAPE);
+        if (readerOrientationButton != null) {
+            readerOrientationButton.setContentDescription(fa(readerPortrait
+                    ? "Switch to landscape reader" : "Switch to portrait reader"));
+        }
     }
 
     private void addFiveMinutes() {
@@ -3986,6 +4001,8 @@ public class MainActivity extends AppCompatActivity {
         }
         if (pdfImage != null) pdfImage.clearBitmap();
         getWindow().clearFlags(WindowManager.LayoutParams.FLAG_KEEP_SCREEN_ON);
+        readerPortrait = false;
+        setRequestedOrientation(android.content.pm.ActivityInfo.SCREEN_ORIENTATION_PORTRAIT);
         activePdf = null;
         pdfImage = null;
         pdfLoading = null;
@@ -3993,11 +4010,11 @@ public class MainActivity extends AppCompatActivity {
         readerNavbar = null;
         readerTimerLabel = null;
         readerTimerButton = null;
-        readerPlayerLabel = null;
         readerPlayerButton = null;
+        readerOrientationButton = null;
         readerPreviousButton = null;
         readerNextButton = null;
-        readerPageSeekBar = null;
+        readerPageSlider = null;
         readerPageLabel = null;
         readerRoot = null;
     }
@@ -4009,7 +4026,7 @@ public class MainActivity extends AppCompatActivity {
         body.addView(description);
         boolean serviceEnabled = isGuardEnabled();
         TextView status = text(serviceEnabled ? "Service enabled" : "Service not enabled", 14,
-                serviceEnabled ? Color.rgb(85, 196, 161) : Color.LTGRAY);
+                serviceEnabled ? color(R.color.focus_secondary) : color(R.color.focus_on_surface_muted));
         LinearLayout.LayoutParams statusParams = new LinearLayout.LayoutParams(-1, -2);
         statusParams.topMargin = dp(12);
         body.addView(status, statusParams);
@@ -4038,10 +4055,10 @@ public class MainActivity extends AppCompatActivity {
             if (packageName.equals(getPackageName()) || packageName.equals(homePackage)
                     || packageName.equals("com.android.settings") || packageName.equals("com.android.systemui")
                     || !shownPackages.add(packageName)) continue;
-            android.widget.CheckBox checkBox = new android.widget.CheckBox(this);
+            MaterialCheckBox checkBox = new MaterialCheckBox(this);
             checkBox.setText(app.loadLabel(getPackageManager()));
             checkBox.setTextColor(Color.WHITE);
-            checkBox.setButtonTintList(android.content.res.ColorStateList.valueOf(Color.rgb(60, 180, 230)));
+            checkBox.setButtonTintList(android.content.res.ColorStateList.valueOf(color(R.color.focus_primary)));
             checkBox.setChecked(selected.contains(packageName));
             checkBox.setOnCheckedChangeListener((buttonView, checked) -> {
                 java.util.Set<String> updated = new java.util.HashSet<>(prefs.getStringSet(BLOCKED_APPS, Collections.emptySet()));
@@ -4144,7 +4161,7 @@ public class MainActivity extends AppCompatActivity {
 
         PdfPageView() {
             super(MainActivity.this);
-            setBackgroundColor(Color.rgb(17, 19, 24));
+            setBackgroundColor(color(R.color.focus_background));
             setLayerType(View.LAYER_TYPE_SOFTWARE, null);
             scaleDetector = new ScaleGestureDetector(MainActivity.this, new ScaleGestureDetector.SimpleOnScaleGestureListener() {
                 @Override
@@ -4316,37 +4333,27 @@ public class MainActivity extends AppCompatActivity {
         }
     }
 
-    private final class TimerProgressView extends View {
-        private final Paint trackPaint = new Paint(Paint.ANTI_ALIAS_FLAG);
-        private final Paint progressPaint = new Paint(Paint.ANTI_ALIAS_FLAG);
-        private final RectF bounds = new RectF();
-        private float progress;
-
+    private final class TimerProgressView extends CircularProgressIndicator {
         TimerProgressView() {
             super(MainActivity.this);
-            trackPaint.setStyle(Paint.Style.STROKE);
-            trackPaint.setStrokeCap(Paint.Cap.ROUND);
-            trackPaint.setStrokeWidth(dp(5));
-            trackPaint.setColor(Color.rgb(47, 51, 62));
-            progressPaint.setStyle(Paint.Style.STROKE);
-            progressPaint.setStrokeCap(Paint.Cap.ROUND);
-            progressPaint.setStrokeWidth(dp(5));
-            progressPaint.setColor(Color.rgb(34, 158, 217));
+            setIndeterminate(false);
+            setTrackThickness(dp(5));
+            setIndicatorColor(color(R.color.focus_primary));
+            setTrackColor(color(R.color.focus_outline));
             setImportantForAccessibility(View.IMPORTANT_FOR_ACCESSIBILITY_NO);
         }
 
-        void setProgress(long remaining, long duration) {
-            progress = duration <= 0 ? 0 : Math.max(0, Math.min(1, (float) (duration - remaining) / duration));
-            invalidate();
+        @Override
+        protected void onSizeChanged(int width, int height, int oldWidth, int oldHeight) {
+            super.onSizeChanged(width, height, oldWidth, oldHeight);
+            int size = Math.max(dp(48), Math.min(width, height));
+            if (getIndicatorSize() != size) setIndicatorSize(size);
         }
 
-        @Override
-        protected void onDraw(android.graphics.Canvas canvas) {
-            super.onDraw(canvas);
-            float inset = trackPaint.getStrokeWidth();
-            bounds.set(inset, inset, getWidth() - inset, getHeight() - inset);
-            canvas.drawArc(bounds, -90, 360, false, trackPaint);
-            if (progress > 0) canvas.drawArc(bounds, -90, progress * 360, false, progressPaint);
+        void setProgress(long remaining, long duration) {
+            float progress = duration <= 0 ? 0 : Math.max(0, Math.min(1,
+                    (float) (duration - remaining) / duration));
+            setProgressCompat(Math.round(progress * 100), false);
         }
     }
 }
