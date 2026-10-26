@@ -359,7 +359,11 @@ public class MainActivity extends AppCompatActivity {
         TextView view = new TextView(this);
         view.setText(fa(value));
         view.setTextSize(size);
-        view.setTextColor(textColor);
+        int resolvedTextColor = textColor == Color.WHITE
+                ? color(R.color.focus_on_surface)
+                : textColor == Color.LTGRAY || textColor == Color.GRAY
+                ? color(R.color.focus_on_surface_muted) : textColor;
+        view.setTextColor(resolvedTextColor);
         if (appTypeface != null) view.setTypeface(appTypeface);
         view.setIncludeFontPadding(false);
         return view;
@@ -369,13 +373,20 @@ public class MainActivity extends AppCompatActivity {
         MaterialButton button = new MaterialButton(this);
         button.setText(fa(label));
         button.setTextSize(14);
-        button.setCornerRadius(dp(4));
+        button.setCornerRadius(dp(14));
         button.setInsetTop(0);
         button.setInsetBottom(0);
         button.setMinHeight(dp(48));
-        button.setBackgroundTintList(android.content.res.ColorStateList.valueOf(color(R.color.focus_primary)));
-        button.setTextColor(color(R.color.focus_background));
+        button.setBackgroundTintList(android.content.res.ColorStateList.valueOf(color(R.color.focus_surface_raised)));
+        button.setTextColor(color(R.color.focus_primary));
         if (appTypeface != null) button.setTypeface(appTypeface);
+        return button;
+    }
+
+    private MaterialButton primaryButton(String label) {
+        MaterialButton button = button(label);
+        button.setBackgroundTintList(android.content.res.ColorStateList.valueOf(color(R.color.focus_primary)));
+        button.setTextColor(color(R.color.focus_on_primary));
         return button;
     }
 
@@ -392,7 +403,7 @@ public class MainActivity extends AppCompatActivity {
         container.setBoxBackgroundMode(TextInputLayout.BOX_BACKGROUND_FILLED);
         container.setBoxBackgroundColor(color(R.color.focus_surface_raised));
         container.setBoxStrokeColor(color(R.color.focus_primary));
-        container.setBoxCornerRadii(dp(4), dp(4), dp(4), dp(4));
+        container.setBoxCornerRadii(dp(12), dp(12), dp(12), dp(12));
         container.setHintTextColor(android.content.res.ColorStateList.valueOf(
                 color(R.color.focus_on_surface_muted)));
         container.setErrorTextColor(android.content.res.ColorStateList.valueOf(color(R.color.focus_error)));
@@ -562,7 +573,7 @@ public class MainActivity extends AppCompatActivity {
         if (appTypeface != null) button.setTypeface(appTypeface);
         button.setIconResource(icon);
         button.setIconGravity(MaterialButton.ICON_GRAVITY_TEXT_START);
-        button.setIconTint(android.content.res.ColorStateList.valueOf(Color.WHITE));
+        button.setIconTint(android.content.res.ColorStateList.valueOf(color(R.color.focus_primary)));
         button.setIconSize(dp(ICON_SIZE_DP));
         button.setIconPadding(0);
         button.setInsetTop(0);
@@ -573,7 +584,7 @@ public class MainActivity extends AppCompatActivity {
         button.setMinimumHeight(dp(ICON_TARGET_DP));
         button.setGravity(Gravity.CENTER);
         button.setPadding(0, 0, 0, 0);
-        button.setCornerRadius(dp(4));
+        button.setCornerRadius(dp(14));
         button.setContentDescription(fa(description));
         button.setBackgroundTintList(android.content.res.ColorStateList.valueOf(color(R.color.focus_surface_raised)));
         button.setOnClickListener(v -> action.run());
@@ -582,8 +593,8 @@ public class MainActivity extends AppCompatActivity {
 
     private MaterialCardView card() {
         MaterialCardView card = new MaterialCardView(this);
-        card.setRadius(dp(8));
-        card.setCardElevation(dp(2));
+        card.setRadius(dp(16));
+        card.setCardElevation(dp(1));
         card.setCardBackgroundColor(color(R.color.focus_surface));
         card.setStrokeColor(color(R.color.focus_outline));
         card.setStrokeWidth(dp(1));
@@ -607,12 +618,12 @@ public class MainActivity extends AppCompatActivity {
         screen.setPadding(dp(16), dp(8), dp(16), dp(12));
         MaterialToolbar header = new MaterialToolbar(this);
         header.setTitle(fa(title));
-        header.setTitleTextColor(Color.WHITE);
+        header.setTitleTextColor(color(R.color.focus_on_surface));
         header.setTitleTextAppearance(this, com.google.android.material.R.style.TextAppearance_MaterialComponents_Headline6);
         android.graphics.drawable.Drawable backIcon = ContextCompat.getDrawable(this, R.drawable.ic_arrow_back);
         if (backIcon != null) {
             backIcon = backIcon.mutate();
-            backIcon.setTint(Color.WHITE);
+            backIcon.setTint(color(R.color.focus_on_surface));
             header.setNavigationIcon(backIcon);
         }
         header.setNavigationContentDescription(fa("Back"));
@@ -692,8 +703,8 @@ public class MainActivity extends AppCompatActivity {
 
     private MaterialCardView miniPlayer() {
         MaterialCardView playerCard = card();
-        playerCard.setRadius(dp(8));
-        playerCard.setCardElevation(dp(4));
+        playerCard.setRadius(dp(16));
+        playerCard.setCardElevation(dp(3));
         LinearLayout player = row();
         player.setPadding(dp(8), dp(4), dp(4), dp(4));
         miniPlayerArtwork = new ImageView(this);
@@ -790,57 +801,64 @@ public class MainActivity extends AppCompatActivity {
         TextView title = text("برای کارهای مهم وقت بساز.", 22, Color.WHITE);
         title.setTypeface(appTypeface, Typeface.BOLD);
         LinearLayout.LayoutParams titleMargin = new LinearLayout.LayoutParams(-1, -2);
-        titleMargin.topMargin = dp(8);
-        titleMargin.bottomMargin = dp(14);
+        titleMargin.topMargin = dp(12);
+        titleMargin.bottomMargin = dp(16);
         content.addView(title, titleMargin);
         TextView dateLabel = text(todayDateLabel(), 13, Color.LTGRAY);
         dateLabel.setGravity(Gravity.CENTER);
-        dateLabel.setPadding(dp(12), dp(10), dp(12), dp(10));
-        dateLabel.setBackgroundResource(android.R.drawable.list_selector_background);
+        dateLabel.setPadding(dp(16), dp(11), dp(16), dp(11));
+        android.graphics.drawable.GradientDrawable dateBackground =
+                new android.graphics.drawable.GradientDrawable();
+        dateBackground.setColor(color(R.color.focus_surface_raised));
+        dateBackground.setCornerRadius(dp(20));
+        dateBackground.setStroke(dp(1), color(R.color.focus_outline));
+        dateLabel.setBackground(new android.graphics.drawable.RippleDrawable(
+                android.content.res.ColorStateList.valueOf(color(R.color.focus_navigation_selected)),
+                dateBackground, null));
         dateLabel.setClickable(true);
         dateLabel.setFocusable(true);
         dateLabel.setContentDescription("انتخاب تاریخ و مشاهدهٔ یادداشت همان روز");
         dateLabel.setOnClickListener(v -> showDatePickerForNotes());
         LinearLayout.LayoutParams dateParams = new LinearLayout.LayoutParams(-1, -2);
-        dateParams.bottomMargin = dp(14);
+        dateParams.bottomMargin = dp(18);
         content.addView(dateLabel, dateParams);
 
         MaterialCardView timerCard = card();
         LinearLayout timerContent = column();
         timerContent.setGravity(Gravity.CENTER);
-        timerContent.setPadding(dp(14), dp(12), dp(14), dp(14));
+        timerContent.setPadding(dp(20), dp(20), dp(20), dp(20));
         timerStatus = text(phaseTitle(timerPhase).toUpperCase(Locale.getDefault()), 12, Color.LTGRAY);
         timerStatus.setLetterSpacing(0.08f);
         timerContent.addView(timerStatus);
         FrameLayout clock = new FrameLayout(this);
         timerProgress = new TimerProgressView();
-        clock.addView(timerProgress, new FrameLayout.LayoutParams(dp(176), dp(176), Gravity.CENTER));
+        clock.addView(timerProgress, new FrameLayout.LayoutParams(dp(196), dp(196), Gravity.CENTER));
         timerText = text("", 46, Color.WHITE);
         timerText.setTypeface(Typeface.create("sans-serif-light", Typeface.NORMAL));
         timerText.setGravity(Gravity.CENTER);
         timerText.setImportantForAccessibility(View.IMPORTANT_FOR_ACCESSIBILITY_NO);
         timerText.setContentDescription(fa("Time remaining in focus session"));
         clock.addView(timerText, new FrameLayout.LayoutParams(-1, -1));
-        LinearLayout.LayoutParams clockParams = new LinearLayout.LayoutParams(-1, dp(166));
-        clockParams.topMargin = dp(2);
+        LinearLayout.LayoutParams clockParams = new LinearLayout.LayoutParams(-1, dp(204));
+        clockParams.topMargin = dp(8);
         timerContent.addView(clock, clockParams);
         TextView duration = text("Pomodoro settings", 13, Color.LTGRAY);
         timerContent.addView(duration);
         duration.setOnClickListener(v -> showPomodoroSettings());
         timerContent.setOnClickListener(v -> showPomodoroSettings());
-        timerButton = button("");
+        timerButton = primaryButton("");
         timerButton.setBackgroundTintList(android.content.res.ColorStateList.valueOf(color(R.color.focus_primary)));
         LinearLayout.LayoutParams startParams = new LinearLayout.LayoutParams(dp(170), dp(52));
-        startParams.topMargin = dp(10);
+        startParams.topMargin = dp(16);
         timerContent.addView(timerButton, startParams);
         timerButton.setOnClickListener(v -> toggleTimer());
         LinearLayout timerActions = row();
         timerActions.setGravity(Gravity.CENTER);
-        timerActions.setPadding(0, dp(8), 0, 0);
+        timerActions.setPadding(0, dp(12), 0, 0);
         MaterialButton resetTimer = button("Reset");
         resetTimer.setIconResource(R.drawable.ic_rotate_right);
         resetTimer.setIconGravity(MaterialButton.ICON_GRAVITY_TEXT_START);
-        resetTimer.setIconTint(android.content.res.ColorStateList.valueOf(Color.WHITE));
+        resetTimer.setIconTint(android.content.res.ColorStateList.valueOf(color(R.color.focus_primary)));
         resetTimer.setBackgroundTintList(android.content.res.ColorStateList.valueOf(color(R.color.focus_surface_raised)));
         resetTimer.setTextColor(color(R.color.focus_on_surface));
         resetTimer.setOnClickListener(v -> resetTimer());
@@ -851,7 +869,7 @@ public class MainActivity extends AppCompatActivity {
         MaterialButton skipTimer = button("Skip");
         skipTimer.setIconResource(R.drawable.ic_skip_next);
         skipTimer.setIconGravity(MaterialButton.ICON_GRAVITY_TEXT_START);
-        skipTimer.setIconTint(android.content.res.ColorStateList.valueOf(Color.WHITE));
+        skipTimer.setIconTint(android.content.res.ColorStateList.valueOf(color(R.color.focus_primary)));
         skipTimer.setBackgroundTintList(android.content.res.ColorStateList.valueOf(color(R.color.focus_surface_raised)));
         skipTimer.setTextColor(color(R.color.focus_on_surface));
         skipTimer.setOnClickListener(v -> skipTimerPhase());
@@ -1034,7 +1052,7 @@ public class MainActivity extends AppCompatActivity {
 
     private void addAction(GridLayout parent, HomeShortcut shortcut) {
         MaterialCardView item = new MaterialCardView(this);
-        item.setRadius(dp(8));
+        item.setRadius(dp(16));
         item.setCardElevation(0);
         item.setStrokeWidth(dp(1));
         item.setStrokeColor(color(R.color.focus_outline));
@@ -1268,7 +1286,7 @@ public class MainActivity extends AppCompatActivity {
         addSettingsField(body, shortBreak);
         addSettingsField(body, longBreak);
         addSettingsField(body, interval);
-        MaterialButton save = button("Save timer settings");
+        MaterialButton save = primaryButton("Save timer settings");
         LinearLayout.LayoutParams saveParams = new LinearLayout.LayoutParams(-1, dp(48));
         saveParams.topMargin = dp(8);
         body.addView(save, saveParams);
@@ -1448,8 +1466,8 @@ public class MainActivity extends AppCompatActivity {
         TextInputEditText input = new TextInputEditText(this);
         input.setInputType(android.text.InputType.TYPE_CLASS_NUMBER);
         input.setSingleLine(true);
-        input.setTextColor(Color.WHITE);
-        input.setHintTextColor(Color.GRAY);
+        input.setTextColor(color(R.color.focus_on_surface));
+        input.setHintTextColor(color(R.color.focus_on_surface_muted));
         input.setHint(fa(hint));
         input.setText(String.valueOf(value));
         return input;
@@ -2100,7 +2118,7 @@ public class MainActivity extends AppCompatActivity {
         content.addView(clock, clockParams);
         LinearLayout controls = row();
         controls.setGravity(Gravity.CENTER);
-        examStartButton = button(examRunning ? "توقف موقت" : "شروع آزمون");
+        examStartButton = primaryButton(examRunning ? "توقف موقت" : "شروع آزمون");
         examStartButton.setOnClickListener(v -> {
             if (!examRunning) {
                 String examName = String.valueOf(title.getText()).trim();
@@ -2212,7 +2230,7 @@ public class MainActivity extends AppCompatActivity {
         LinearLayout content = column();
         content.setPadding(0, dp(8), 0, dp(12));
         LinearLayout actions = row();
-        MaterialButton addReminder = button("یادآوری جدید");
+        MaterialButton addReminder = primaryButton("یادآوری جدید");
         addReminder.setOnClickListener(v -> showReminderEditor());
         actions.addView(addReminder, new LinearLayout.LayoutParams(0, dp(48), 1));
         MaterialButton addTask = button("کار جدید");
@@ -2368,7 +2386,7 @@ public class MainActivity extends AppCompatActivity {
         noiseRow.setPadding(dp(12), dp(9), dp(12), dp(9));
         ImageView noiseIcon = new ImageView(this);
         noiseIcon.setImageResource(R.drawable.ic_graphic_eq);
-        noiseIcon.setImageTintList(android.content.res.ColorStateList.valueOf(Color.WHITE));
+        noiseIcon.setImageTintList(android.content.res.ColorStateList.valueOf(color(R.color.focus_on_primary)));
         noiseIcon.setContentDescription("White noise");
         noiseIcon.setBackground(makeArtworkBackground());
         noiseIcon.setPadding(dp(8), dp(8), dp(8), dp(8));
@@ -2389,7 +2407,7 @@ public class MainActivity extends AppCompatActivity {
         list.addView(noise, noiseParams);
 
         LinearLayout libraryActions = row();
-        MaterialButton add = button("+ Add files");
+        MaterialButton add = primaryButton("+ Add files");
         add.setMinHeight(dp(48));
         add.setOnClickListener(v -> {
             Intent intent = new Intent(Intent.ACTION_OPEN_DOCUMENT);
@@ -2401,7 +2419,7 @@ public class MainActivity extends AppCompatActivity {
         libraryActions.addView(add, new LinearLayout.LayoutParams(0, dp(48), 1));
         MaterialButton queueButton = button("Queue " + queue.size());
         queueButton.setIconResource(R.drawable.ic_queue_music);
-        queueButton.setIconTint(android.content.res.ColorStateList.valueOf(color(R.color.focus_background)));
+        queueButton.setIconTint(android.content.res.ColorStateList.valueOf(color(R.color.focus_primary)));
         queueButton.setMinHeight(dp(48));
         queueButton.setContentDescription("Open playback queue with " + queue.size() + " tracks");
         queueButton.setOnClickListener(v -> showQueue());
@@ -2410,7 +2428,7 @@ public class MainActivity extends AppCompatActivity {
         libraryActions.addView(queueButton, queueParams);
         list.addView(libraryActions);
         if (tracks.isEmpty()) {
-            MaterialButton scan = button("Load device music library");
+            MaterialButton scan = primaryButton("Load device music library");
             LinearLayout.LayoutParams scanParams = new LinearLayout.LayoutParams(-1, dp(48));
             scanParams.topMargin = dp(6);
             list.addView(scan, scanParams);
@@ -2424,13 +2442,13 @@ public class MainActivity extends AppCompatActivity {
         }
         musicSearch = new TextInputEditText(this);
         musicSearch.setSingleLine(true);
-        musicSearch.setTextColor(Color.WHITE);
-        musicSearch.setHintTextColor(Color.GRAY);
+        musicSearch.setTextColor(color(R.color.focus_on_surface));
+        musicSearch.setHintTextColor(color(R.color.focus_on_surface_muted));
         musicSearch.setHint(fa("Search tracks, artists, albums"));
         android.graphics.drawable.Drawable searchIcon = ContextCompat.getDrawable(this, R.drawable.ic_search);
         if (searchIcon != null) {
             searchIcon = searchIcon.mutate();
-            searchIcon.setTint(Color.LTGRAY);
+            searchIcon.setTint(color(R.color.focus_on_surface_muted));
         }
         musicSearch.setCompoundDrawablesWithIntrinsicBounds(searchIcon, null, null, null);
         musicSearch.setCompoundDrawablePadding(dp(8));
@@ -3154,9 +3172,9 @@ public class MainActivity extends AppCompatActivity {
         LinearLayout list = column();
         list.setPadding(0, dp(4), 0, dp(12));
         LinearLayout actions = row();
-        MaterialButton add = button("Add PDF");
+        MaterialButton add = primaryButton("Add PDF");
         add.setIconResource(R.drawable.ic_add);
-        add.setIconTint(android.content.res.ColorStateList.valueOf(color(R.color.focus_background)));
+        add.setIconTint(android.content.res.ColorStateList.valueOf(color(R.color.focus_on_primary)));
         add.setMinHeight(dp(48));
         add.setContentDescription("Add PDF document");
         add.setOnClickListener(v -> pickPdf());
@@ -3224,7 +3242,8 @@ public class MainActivity extends AppCompatActivity {
             details.addView(textDetails, textParams);
             ImageView chevron = new ImageView(this);
             chevron.setImageResource(R.drawable.ic_chevron_right);
-            chevron.setImageTintList(android.content.res.ColorStateList.valueOf(Color.LTGRAY));
+            chevron.setImageTintList(android.content.res.ColorStateList.valueOf(
+                    color(R.color.focus_on_surface_muted)));
             details.addView(chevron, new LinearLayout.LayoutParams(dp(24), dp(24)));
             item.addView(details);
             item.setMinimumHeight(dp(72));
@@ -3670,9 +3689,9 @@ public class MainActivity extends AppCompatActivity {
         pageJump.setInputType(android.text.InputType.TYPE_CLASS_NUMBER);
         pageJump.setSingleLine(true);
         pageJump.setTextSize(12);
-        pageJump.setTextColor(Color.WHITE);
+        pageJump.setTextColor(color(R.color.focus_on_surface));
         pageJump.setHint(fa("Page"));
-        pageJump.setHintTextColor(Color.GRAY);
+        pageJump.setHintTextColor(color(R.color.focus_on_surface_muted));
         pageJump.setMinWidth(dp(56));
         pageJump.setImeOptions(android.view.inputmethod.EditorInfo.IME_ACTION_GO);
         pageJump.setOnEditorActionListener((view, actionId, event) -> {
@@ -3699,7 +3718,7 @@ public class MainActivity extends AppCompatActivity {
         pageNavigation.addView(inputContainer(pageJump, "Page"),
                 new LinearLayout.LayoutParams(dp(72), dp(64)));
         MaterialCardView pageNavigationCard = card();
-        pageNavigationCard.setRadius(dp(8));
+        pageNavigationCard.setRadius(dp(16));
         pageNavigationCard.addView(pageNavigation);
         LinearLayout.LayoutParams pageNavigationParams = new LinearLayout.LayoutParams(-1, dp(68));
         pageNavigationParams.topMargin = dp(4);
@@ -4057,7 +4076,7 @@ public class MainActivity extends AppCompatActivity {
                     || !shownPackages.add(packageName)) continue;
             MaterialCheckBox checkBox = new MaterialCheckBox(this);
             checkBox.setText(app.loadLabel(getPackageManager()));
-            checkBox.setTextColor(Color.WHITE);
+            checkBox.setTextColor(color(R.color.focus_on_surface));
             checkBox.setButtonTintList(android.content.res.ColorStateList.valueOf(color(R.color.focus_primary)));
             checkBox.setChecked(selected.contains(packageName));
             checkBox.setOnCheckedChangeListener((buttonView, checked) -> {

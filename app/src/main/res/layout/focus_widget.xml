@@ -3,7 +3,7 @@
     xmlns:app="http://schemas.android.com/apk/res-auto"
     android:layout_width="match_parent"
     android:layout_height="match_parent"
-    android:background="#1D2028"
+    android:background="@color/focus_surface"
     android:gravity="center_vertical"
     android:minHeight="72dp"
     android:orientation="horizontal"
@@ -24,7 +24,7 @@
             android:letterSpacing="0.08"
             android:fontFamily="@font/vazirmatn_regular"
             android:text="جلسهٔ تمرکز"
-            android:textColor="#A8DDF4"
+            android:textColor="@color/focus_primary"
             android:textSize="11sp" />
 
         <Chronometer
@@ -35,7 +35,7 @@
             android:fontFamily="@font/vazirmatn_medium"
             android:format="%s"
             android:text="۲۵:۰۰"
-            android:textColor="#F5F6FA"
+            android:textColor="@color/focus_on_surface"
             android:textSize="28sp" />
     </LinearLayout>
 

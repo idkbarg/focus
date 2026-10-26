@@ -6,7 +6,7 @@ Focus is a lightweight native Android Pomodoro app built with Java and Material 
 
 - Adjustable focus timer (15, 25, 30, 45, 60 minutes, or a custom duration), with pause/resume and a completion entry saved to that day's note.
 - Persian-first Material 2 interface with bundled Vazirmatn typography, right-to-left layout, Jalali and Gregorian dates, Material top/bottom navigation, and a Telegram X-inspired blue visual style.
-- A shared Material 2 visual system uses consistent color roles, typography, 8dp layout spacing, elevated cards, accessible touch targets, filled text fields, Material switches, checkboxes, sliders, and progress indicators across the app.
+- A shared Material 2 visual system follows the device's light/dark appearance and uses consistent color roles, Persian typography, spacious layouts, rounded cards, accessible touch targets, filled text fields, Material switches, checkboxes, sliders, and progress indicators across the app.
 - Extensible Quick access tiles for the built-in calculator, Notes, Music, PDFs, exam timer, reminders, and apps you choose from the app list. Long-press an added app tile to remove it.
 - Home screen timer widget with a live countdown on Android 7.0+ and a start/pause control.
 - Optional focus guard: choose distracting apps and enable the Focus accessibility service in Android Settings. While a Pomodoro is running, opening a selected app returns to the home screen. The guard is opt-in and only observes app/window changes needed for that behavior.

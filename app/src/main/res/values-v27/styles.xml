@@ -1,0 +1,26 @@
+<resources>
+    <style name="Theme.Focus" parent="Theme.MaterialComponents.DayNight.NoActionBar">
+        <item name="colorPrimary">@color/focus_primary</item>
+        <item name="colorPrimaryVariant">@color/focus_primary_variant</item>
+        <item name="colorSecondary">@color/focus_secondary</item>
+        <item name="colorSecondaryVariant">@color/focus_secondary</item>
+        <item name="colorError">@color/focus_error</item>
+        <item name="colorOnPrimary">@color/focus_on_primary</item>
+        <item name="colorSurface">@color/focus_surface</item>
+        <item name="colorOnSurface">@color/focus_on_surface</item>
+        <item name="colorOnBackground">@color/focus_on_surface</item>
+        <item name="android:colorBackground">@color/focus_background</item>
+        <item name="materialCardViewStyle">@style/Widget.Focus.Card</item>
+        <item name="textInputStyle">@style/Widget.Focus.TextInputLayout</item>
+        <item name="android:windowLightStatusBar">@bool/focus_light_system_bars</item>
+        <item name="android:statusBarColor">@color/focus_background</item>
+        <item name="android:windowLightNavigationBar">@bool/focus_light_system_bars</item>
+        <item name="android:navigationBarColor">@color/focus_background</item>
+        <item name="android:windowBackground">@color/focus_background</item>
+        <item name="android:fontFamily">@font/vazirmatn_regular</item>
+        <item name="fontFamily">@font/vazirmatn_regular</item>
+        <item name="shapeAppearanceSmallComponent">@style/Shape.Focus.Small</item>
+        <item name="shapeAppearanceMediumComponent">@style/Shape.Focus.Medium</item>
+        <item name="materialButtonStyle">@style/Widget.Focus.Button</item>
+    </style>
+</resources>

@@ -11,6 +11,8 @@ import android.os.Build;
 import android.os.SystemClock;
 import android.widget.RemoteViews;
 
+import androidx.core.content.ContextCompat;
+
 import java.util.Locale;
 
 public class FocusWidgetProvider extends AppWidgetProvider {
@@ -50,6 +52,8 @@ public class FocusWidgetProvider extends AppWidgetProvider {
         views.setTextViewText(R.id.widget_phase, phaseLabel(phase));
         views.setImageViewResource(R.id.widget_toggle,
                 running ? R.drawable.ic_pause : R.drawable.ic_play_arrow);
+        views.setInt(R.id.widget_toggle, "setColorFilter",
+                ContextCompat.getColor(context, R.color.focus_on_primary));
         views.setContentDescription(R.id.widget_toggle,
                 running ? "توقف موقت زمان‌سنج تمرکز" : "شروع زمان‌سنج تمرکز");
 
