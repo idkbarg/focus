@@ -9,7 +9,6 @@
         <item name="colorSurface">#1D2028</item>
         <item name="colorOnSurface">#F5F6FA</item>
         <item name="colorOnBackground">#F5F6FA</item>
-        <item name="android:windowLightStatusBar">false</item>
         <item name="android:statusBarColor">#111318</item>
         <item name="android:navigationBarColor">#111318</item>
         <item name="android:windowBackground">#111318</item>

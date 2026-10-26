@@ -233,6 +233,7 @@ public class MainActivity extends AppCompatActivity {
         prefs = getSharedPreferences(PREFS, MODE_PRIVATE);
         createReminderChannel();
         loadSavedTracks();
+        restoreQueue();
         timerPhase = prefs.getString("timer_phase", "focus");
         durationMillis = prefs.getLong("timer_duration", durationForPhase(timerPhase));
         remainingMillis = prefs.getLong("timer_remaining", durationMillis);
@@ -3245,10 +3246,13 @@ public class MainActivity extends AppCompatActivity {
                 scanPdfChildren(treeUri, rootId, found, seen, 0);
                 runOnUiThread(() -> {
                     int added = 0;
-                    Set<String> savedUris = new HashSet<>();
-                    for (PdfItem saved : pdfs) savedUris.add(saved.uri.toString());
                     for (PdfItem pdf : found) {
-                        if (savedUris.add(pdf.uri.toString())) {
+                        boolean exists = false;
+                        for (PdfItem saved : pdfs) if (saved.uri.equals(pdf.uri)) {
+                            exists = true;
+                            break;
+                        }
+                        if (!exists) {
                             pdfs.add(pdf);
                             added++;
                         }

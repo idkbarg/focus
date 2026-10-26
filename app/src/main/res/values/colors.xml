@@ -1,7 +1,15 @@
 <resources>
     <color name="focus_primary">#229ED9</color>
+    <color name="focus_primary_variant">#168AC2</color>
+    <color name="focus_secondary">#55C4A1</color>
+    <color name="focus_on_primary">#FFFFFF</color>
+    <color name="focus_background">#111318</color>
     <color name="focus_on_surface_muted">#B2B6C1</color>
     <color name="focus_surface">#1D2028</color>
+    <color name="focus_surface_raised">#272B35</color>
+    <color name="focus_outline">#414653</color>
+    <color name="focus_on_surface">#F5F6FA</color>
     <color name="focus_navigation">#181A21</color>
     <color name="focus_navigation_selected">#262833</color>
+    <color name="focus_error">#CF6679</color>
 </resources>
