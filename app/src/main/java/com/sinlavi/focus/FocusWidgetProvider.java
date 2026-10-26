@@ -14,8 +14,22 @@ import android.widget.RemoteViews;
 import androidx.core.content.ContextCompat;
 
 import java.util.Locale;
+import java.text.SimpleDateFormat;
+import java.util.Date;
 
 public class FocusWidgetProvider extends AppWidgetProvider {
+    @Override
+    public void onReceive(Context context, Intent intent) {
+        String action = intent.getAction();
+        if (Intent.ACTION_DATE_CHANGED.equals(action)
+                || "android.intent.action.TIME_SET".equals(action)
+                || Intent.ACTION_TIMEZONE_CHANGED.equals(action)) {
+            updateAll(context);
+            return;
+        }
+        super.onReceive(context, intent);
+    }
+
     @Override
     public void onUpdate(Context context, AppWidgetManager appWidgetManager, int[] appWidgetIds) {
         for (int appWidgetId : appWidgetIds) updateWidget(context, appWidgetManager, appWidgetId);
@@ -50,6 +64,12 @@ public class FocusWidgetProvider extends AppWidgetProvider {
                     seconds / 60, seconds % 60));
         }
         views.setTextViewText(R.id.widget_phase, phaseLabel(phase));
+        String today = new SimpleDateFormat("yyyy-MM-dd", Locale.US).format(new Date());
+        int sessions = prefs.getInt("stats_count:" + today, 0);
+        long studyMinutes = prefs.getLong("stats_study:" + today, 0) / 60_000L;
+        views.setTextViewText(R.id.widget_stats, "امروز · "
+                + CalendarDateUtils.digits(sessions) + " جلسه · "
+                + CalendarDateUtils.digits(studyMinutes) + " دقیقه");
         views.setImageViewResource(R.id.widget_toggle,
                 running ? R.drawable.ic_pause : R.drawable.ic_play_arrow);
         views.setInt(R.id.widget_toggle, "setColorFilter",

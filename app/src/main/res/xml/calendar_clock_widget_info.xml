@@ -1,0 +1,10 @@
+<?xml version="1.0" encoding="utf-8"?>
+<appwidget-provider xmlns:android="http://schemas.android.com/apk/res/android"
+    android:initialLayout="@layout/calendar_clock_widget"
+    android:label="@string/calendar_clock_widget_label"
+    android:minHeight="120dp"
+    android:minResizeHeight="100dp"
+    android:minResizeWidth="180dp"
+    android:minWidth="250dp"
+    android:resizeMode="horizontal|vertical"
+    android:widgetCategory="home_screen" />

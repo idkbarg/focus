@@ -1,0 +1,71 @@
+<?xml version="1.0" encoding="utf-8"?>
+<LinearLayout xmlns:android="http://schemas.android.com/apk/res/android"
+    android:layout_width="match_parent"
+    android:layout_height="match_parent"
+    android:background="@color/focus_surface"
+    android:gravity="center_vertical"
+    android:orientation="horizontal"
+    android:padding="14dp">
+
+    <LinearLayout
+        android:id="@+id/clock_widget_open"
+        android:layout_width="0dp"
+        android:layout_height="match_parent"
+        android:layout_weight="1"
+        android:gravity="center_vertical"
+        android:orientation="vertical">
+
+        <TextClock
+            android:id="@+id/clock_widget_time"
+            android:layout_width="wrap_content"
+            android:layout_height="wrap_content"
+            android:format12Hour="h:mm"
+            android:format24Hour="HH:mm"
+            android:fontFamily="@font/vazirmatn_medium"
+            android:textColor="@color/focus_on_surface"
+            android:textSize="32sp" />
+
+        <TextView
+            android:id="@+id/clock_widget_jalali"
+            android:layout_width="match_parent"
+            android:layout_height="wrap_content"
+            android:fontFamily="@font/vazirmatn_regular"
+            android:maxLines="1"
+            android:text="شمسی"
+            android:textColor="@color/focus_primary"
+            android:textSize="11sp" />
+
+        <TextView
+            android:id="@+id/clock_widget_gregorian"
+            android:layout_width="match_parent"
+            android:layout_height="wrap_content"
+            android:fontFamily="@font/vazirmatn_regular"
+            android:maxLines="1"
+            android:text="میلادی"
+            android:textColor="@color/focus_on_surface_muted"
+            android:textSize="10sp" />
+
+        <TextView
+            android:id="@+id/clock_widget_hijri"
+            android:layout_width="match_parent"
+            android:layout_height="wrap_content"
+            android:fontFamily="@font/vazirmatn_regular"
+            android:maxLines="1"
+            android:text="قمری"
+            android:textColor="@color/focus_on_surface_muted"
+            android:textSize="10sp" />
+    </LinearLayout>
+
+    <TextView
+        android:id="@+id/clock_widget_cycle"
+        android:layout_width="wrap_content"
+        android:layout_height="48dp"
+        android:background="@drawable/widget_icon_background"
+        android:fontFamily="@font/vazirmatn_regular"
+        android:gravity="center"
+        android:paddingStart="10dp"
+        android:paddingEnd="10dp"
+        android:text="تقویم شمسی"
+        android:textColor="@color/focus_on_primary"
+        android:textSize="10sp" />
+</LinearLayout>

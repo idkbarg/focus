@@ -5,6 +5,8 @@
         <item name="colorSecondary">#55C4A1</item>
         <item name="colorSecondaryVariant">#3FAE8C</item>
         <item name="android:colorBackground">#111318</item>
+        <item name="android:textColorPrimary">@color/focus_on_surface</item>
+        <item name="android:textColorSecondary">@color/focus_on_surface_muted</item>
         <item name="colorOnPrimary">#FFFFFF</item>
         <item name="colorSurface">#1D2028</item>
         <item name="colorOnSurface">#F5F6FA</item>
