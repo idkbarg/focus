@@ -1,15 +1,20 @@
 <resources>
     <style name="Theme.Focus" parent="Theme.MaterialComponents.DayNight.NoActionBar">
-        <item name="colorPrimary">#6C63FF</item>
-        <item name="colorPrimaryVariant">#5148D8</item>
+        <item name="colorPrimary">#229ED9</item>
+        <item name="colorPrimaryVariant">#168AC2</item>
         <item name="colorSecondary">#55C4A1</item>
+        <item name="colorSecondaryVariant">#3FAE8C</item>
+        <item name="android:colorBackground">#111318</item>
         <item name="colorOnPrimary">#FFFFFF</item>
         <item name="colorSurface">#1D2028</item>
         <item name="colorOnSurface">#F5F6FA</item>
+        <item name="colorOnBackground">#F5F6FA</item>
+        <item name="android:windowLightStatusBar">false</item>
         <item name="android:statusBarColor">#111318</item>
         <item name="android:navigationBarColor">#111318</item>
         <item name="android:windowBackground">#111318</item>
-        <item name="android:fontFamily">sans</item>
+        <item name="android:fontFamily">@font/vazirmatn_regular</item>
+        <item name="fontFamily">@font/vazirmatn_regular</item>
         <item name="shapeAppearanceSmallComponent">@style/Shape.Focus.Small</item>
         <item name="shapeAppearanceMediumComponent">@style/Shape.Focus.Medium</item>
         <item name="materialButtonStyle">@style/Widget.Focus.Button</item>
@@ -17,7 +22,7 @@
 
     <style name="Shape.Focus.Small" parent="ShapeAppearance.MaterialComponents.SmallComponent">
         <item name="cornerFamily">rounded</item>
-        <item name="cornerSize">8dp</item>
+        <item name="cornerSize">4dp</item>
     </style>
 
     <style name="Shape.Focus.Medium" parent="ShapeAppearance.MaterialComponents.MediumComponent">
@@ -31,6 +36,27 @@
         <item name="android:paddingEnd">16dp</item>
         <item name="android:letterSpacing">0</item>
         <item name="android:textAllCaps">false</item>
+    </style>
+
+    <style name="Widget.Focus.BottomNavigationView" parent="Widget.MaterialComponents.BottomNavigationView">
+        <item name="itemIconTint">@color/navigation_item_tint</item>
+        <item name="itemTextColor">@color/navigation_item_tint</item>
+        <item name="itemBackground">@color/navigation_item_background</item>
+        <item name="itemTextAppearanceActive">@style/TextAppearance.Focus.Navigation.Active</item>
+        <item name="itemTextAppearanceInactive">@style/TextAppearance.Focus.Navigation.Inactive</item>
+        <item name="itemHorizontalTranslationEnabled">false</item>
+    </style>
+
+    <style name="TextAppearance.Focus.Navigation.Active" parent="TextAppearance.MaterialComponents.Caption">
+        <item name="fontFamily">@font/vazirmatn_medium</item>
+        <item name="android:fontFamily">@font/vazirmatn_medium</item>
+        <item name="android:textSize">11sp</item>
+    </style>
+
+    <style name="TextAppearance.Focus.Navigation.Inactive" parent="TextAppearance.MaterialComponents.Caption">
+        <item name="fontFamily">@font/vazirmatn_regular</item>
+        <item name="android:fontFamily">@font/vazirmatn_regular</item>
+        <item name="android:textSize">11sp</item>
     </style>
 
     <style name="Widget.Focus.IconButton" parent="Widget.MaterialComponents.Button">

@@ -23,6 +23,8 @@ import android.media.AudioTrack;
 import android.media.MediaPlayer;
 import android.media.MediaMetadataRetriever;
 import android.app.NotificationManager;
+import android.app.DatePickerDialog;
+import android.app.TimePickerDialog;
 import android.net.Uri;
 import android.os.Build;
 import android.os.Bundle;
@@ -41,6 +43,7 @@ import android.view.Gravity;
 import android.view.MotionEvent;
 import android.view.ScaleGestureDetector;
 import android.view.View;
+import android.view.WindowManager;
 import android.widget.FrameLayout;
 import android.widget.ImageView;
 import android.widget.LinearLayout;
@@ -49,12 +52,15 @@ import android.widget.TextView;
 import android.widget.HorizontalScrollView;
 import android.widget.GridLayout;
 import android.widget.ProgressBar;
+import android.widget.SeekBar;
 import android.widget.Toast;
+import android.widget.CheckBox;
 
 import androidx.annotation.Nullable;
 import androidx.appcompat.app.AppCompatActivity;
 import androidx.core.app.ActivityCompat;
 import androidx.core.content.ContextCompat;
+import androidx.core.content.res.ResourcesCompat;
 import androidx.core.graphics.Insets;
 import androidx.core.view.ViewCompat;
 import androidx.core.view.WindowInsetsCompat;
@@ -69,9 +75,12 @@ import org.json.JSONException;
 import org.json.JSONObject;
 
 import java.io.IOException;
+import java.io.File;
+import java.io.FileOutputStream;
 import java.text.DateFormat;
 import java.text.SimpleDateFormat;
 import java.util.ArrayList;
+import java.util.Calendar;
 import java.util.Collections;
 import java.util.Date;
 import java.util.List;
@@ -81,8 +90,12 @@ import java.util.HashSet;
 import java.util.LinkedHashSet;
 import java.util.Set;
 import java.util.HashMap;
+import java.security.MessageDigest;
+import java.security.NoSuchAlgorithmException;
+import java.util.UUID;
 import java.util.concurrent.ExecutorService;
 import java.util.concurrent.Executors;
+import java.util.concurrent.atomic.AtomicInteger;
 
 public class MainActivity extends AppCompatActivity {
     private static final int REQUEST_AUDIO_PERMISSION = 10;
@@ -94,20 +107,29 @@ public class MainActivity extends AppCompatActivity {
     public static final String EXTRA_WIDGET_ACTION = "widget_action";
     public static final String WIDGET_ACTION_TOGGLE_TIMER = "toggle_timer";
     public static final String WIDGET_ACTION_OPEN_APP = "open_app";
+    public static final String EXTRA_OPEN_REMINDERS = "open_reminders";
     private static final String PDF_LIST = "pdf_library";
     private static final String AUDIO_LIST = "audio_library";
     private static final String BLOCKED_APPS = "blocked_apps";
     private static final long TICK_MS = 1000;
+    private static final int LIBRARY_PAGE_SIZE = 40;
     private static final int ICON_SIZE_DP = 20;
     private static final int ICON_TARGET_DP = 48;
     private static final String HOME_APP_SHORTCUTS = "home_app_shortcuts";
+    private static final String SAVED_REMINDERS = "saved_reminders";
+    private static final String TASKS_PREFIX = "tasks:";
+    private static final String EXAM_REMINDER_ID = "exam_timer";
     private final Handler handler = new Handler(Looper.getMainLooper());
     private final List<Track> tracks = new ArrayList<>();
     private final List<Integer> queue = new ArrayList<>();
     private final List<PdfItem> pdfs = new ArrayList<>();
     private final ExecutorService ioExecutor = Executors.newSingleThreadExecutor();
+    private final ExecutorService persistenceExecutor = Executors.newSingleThreadExecutor();
+    private final ExecutorService pdfExecutor = Executors.newSingleThreadExecutor();
     private final Map<String, Bitmap> artworkCache = new HashMap<>();
+    private final Map<String, Bitmap> pdfCoverCache = new HashMap<>();
     private final Set<String> artworkLoads = new HashSet<>();
+    private final Set<String> pdfCoverLoads = new HashSet<>();
     private android.content.SharedPreferences prefs;
     private LinearLayout screen;
     private TextView timerText;
@@ -124,7 +146,14 @@ public class MainActivity extends AppCompatActivity {
     private TextView readerPageLabel;
     private MaterialButton readerTimerButton;
     private MaterialButton readerPlayerButton;
+    private MaterialButton readerPreviousButton;
+    private MaterialButton readerNextButton;
+    private SeekBar readerPageSeekBar;
     private TextInputEditText musicSearch;
+    private TextView miniPlayerTitle;
+    private TextView miniPlayerArtist;
+    private ImageView miniPlayerArtwork;
+    private MaterialButton miniPlayerPlayButton;
     private String activeScreen = "home";
     private Runnable backAction;
     private MediaPlayer mediaPlayer;
@@ -138,11 +167,18 @@ public class MainActivity extends AppCompatActivity {
     private String timerPhase = "focus";
     private boolean scanningPdfs;
     private boolean loadingTracks;
+    private boolean loadingSavedTracks;
     private boolean tracksLoaded;
-    private PdfRenderer renderer;
-    private ParcelFileDescriptor pdfDescriptor;
+    private volatile PdfRenderer renderer;
+    private volatile ParcelFileDescriptor pdfDescriptor;
+    private volatile File activePdfFile;
+    private final Object pdfLock = new Object();
+    private volatile int pdfPageCount;
+    private final AtomicInteger pdfRenderRequestId = new AtomicInteger();
     private PdfItem activePdf;
     private int currentPage;
+    private int visibleTrackCount = LIBRARY_PAGE_SIZE;
+    private int visiblePdfCount = LIBRARY_PAGE_SIZE;
     private boolean pageRotated = true;
     private boolean readerControlsVisible = true;
     private boolean isHome = true;
@@ -150,6 +186,31 @@ public class MainActivity extends AppCompatActivity {
     private HorizontalScrollView readerNavbar;
     private FrameLayout readerRoot;
     private PdfPageView pdfImage;
+    private ProgressBar pdfLoading;
+    private Typeface appTypeface;
+    private long examDurationMillis = 90 * 60_000L;
+    private long examRemainingMillis = examDurationMillis;
+    private long examEndAtElapsed;
+    private boolean examRunning;
+    private String examTitle = "آزمون";
+    private TextView examTimeText;
+    private TextView examHomeSummary;
+    private MaterialButton examStartButton;
+    private TimerProgressView examProgress;
+
+    private final Runnable examTick = new Runnable() {
+        @Override
+        public void run() {
+            if (!examRunning) return;
+            examRemainingMillis = Math.max(0, examEndAtElapsed - SystemClock.elapsedRealtime());
+            updateExamDisplay();
+            if (examRemainingMillis == 0) {
+                finishExamTimer();
+                return;
+            }
+            handler.postDelayed(this, TICK_MS);
+        }
+    };
 
     private final Runnable timerTick = new Runnable() {
         @Override
@@ -166,11 +227,23 @@ public class MainActivity extends AppCompatActivity {
     };
 
     @Override
+    protected void attachBaseContext(Context base) {
+        Locale.setDefault(new Locale("fa", "IR"));
+        android.content.res.Configuration configuration =
+                new android.content.res.Configuration(base.getResources().getConfiguration());
+        configuration.setLocale(new Locale("fa", "IR"));
+        configuration.setLayoutDirection(new Locale("fa", "IR"));
+        super.attachBaseContext(base.createConfigurationContext(configuration));
+    }
+
+    @Override
     protected void onCreate(@Nullable Bundle savedInstanceState) {
         super.onCreate(savedInstanceState);
+        AppDiagnostics.initialize(this);
+        appTypeface = ResourcesCompat.getFont(this, R.font.vazirmatn_regular);
         prefs = getSharedPreferences(PREFS, MODE_PRIVATE);
+        createReminderChannel();
         loadSavedTracks();
-        restoreQueue();
         timerPhase = prefs.getString("timer_phase", "focus");
         durationMillis = prefs.getLong("timer_duration", durationForPhase(timerPhase));
         remainingMillis = prefs.getLong("timer_remaining", durationMillis);
@@ -192,9 +265,12 @@ public class MainActivity extends AppCompatActivity {
                         .putLong("timer_remaining", remainingMillis).apply();
             }
         }
+        restoreExamTimer();
+        ReminderScheduler.rescheduleAll(this);
         buildHome();
         handleWidgetAction(getIntent());
         if (timerRunning) handler.post(timerTick);
+        if (examRunning) handler.post(examTick);
     }
 
     @Override
@@ -214,7 +290,13 @@ public class MainActivity extends AppCompatActivity {
     }
 
     private void handleWidgetAction(Intent intent) {
-        if (intent == null || !WIDGET_ACTION_TOGGLE_TIMER.equals(intent.getStringExtra(EXTRA_WIDGET_ACTION))) return;
+        if (intent == null) return;
+        if (intent.getBooleanExtra(EXTRA_OPEN_REMINDERS, false)) {
+            intent.removeExtra(EXTRA_OPEN_REMINDERS);
+            showReminders();
+            return;
+        }
+        if (!WIDGET_ACTION_TOGGLE_TIMER.equals(intent.getStringExtra(EXTRA_WIDGET_ACTION))) return;
         intent.removeExtra(EXTRA_WIDGET_ACTION);
         toggleTimer();
     }
@@ -228,15 +310,23 @@ public class MainActivity extends AppCompatActivity {
         } else if (prefs != null) {
             prefs.edit().putLong("timer_remaining", remainingMillis).apply();
         }
+        if (examRunning) {
+            examRemainingMillis = Math.max(0, examEndAtElapsed - SystemClock.elapsedRealtime());
+            prefs.edit().putLong("exam_end_wall", System.currentTimeMillis() + examRemainingMillis)
+                    .putLong("exam_remaining", examRemainingMillis).apply();
+        }
     }
 
     @Override
     protected void onDestroy() {
         handler.removeCallbacks(timerTick);
+        handler.removeCallbacks(examTick);
         saveQueue();
         ioExecutor.shutdownNow();
+        persistenceExecutor.shutdown();
         releaseAudio();
         closePdf();
+        pdfExecutor.shutdown();
         super.onDestroy();
     }
 
@@ -264,23 +354,174 @@ public class MainActivity extends AppCompatActivity {
 
     private TextView text(String value, int size, int textColor) {
         TextView view = new TextView(this);
-        view.setText(value);
+        view.setText(fa(value));
         view.setTextSize(size);
         view.setTextColor(textColor);
+        if (appTypeface != null) view.setTypeface(appTypeface);
         return view;
     }
 
     private MaterialButton button(String label) {
         MaterialButton button = new MaterialButton(this);
-        button.setText(label);
+        button.setText(fa(label));
         button.setTextSize(14);
         button.setCornerRadius(dp(14));
+        if (appTypeface != null) button.setTypeface(appTypeface);
         return button;
+    }
+
+    private String fa(String value) {
+        if (value == null) return "";
+        switch (value) {
+            case "Timer": return "تمرکز";
+            case "Notes": return "یادداشت‌ها";
+            case "Note editor": return "ویرایش یادداشت";
+            case "Reminders": return "یادآورها";
+            case "Exam timer": return "زمان‌سنج آزمون";
+            case "PDFs": return "PDF";
+            case "PDF library": return "کتابخانهٔ PDF";
+            case "Music": return "موسیقی";
+            case "Queue": return "صف پخش";
+            case "Pomodoro settings": return "تنظیمات تمرکز";
+            case "Make room for what matters.": return "برای کارهای مهم وقت بساز.";
+            case "Focus guard": return "محافظ تمرکز";
+            case "Start": return "شروع";
+            case "Pause": return "توقف موقت";
+            case "Resume": return "ادامه";
+            case "Pause timer": return "توقف موقت زمان‌سنج";
+            case "Start or resume timer": return "شروع یا ادامهٔ زمان‌سنج";
+            case "Reset": return "بازنشانی";
+            case "Skip": return "ردکردن";
+            case "LAST PDF": return "آخرین PDF";
+            case "Browse": return "مرور";
+            case "Open": return "بازکردن";
+            case "Load more": return "نمایش موارد بیشتر";
+            case "Nothing playing": return "چیزی در حال پخش نیست";
+            case "Choose a track": return "یک آهنگ انتخاب کنید";
+            case "Open music player": return "بازکردن پخش‌کنندهٔ موسیقی";
+            case "Page": return "صفحه";
+            case "Add PDF": return "افزودن PDF";
+            case "Scan folder": return "اسکن پوشه";
+            case "Next": return "بعدی";
+            case "Previous": return "قبلی";
+            case "Add files": return "افزودن فایل";
+            case "Add an app shortcut": return "افزودن میان‌بر برنامه";
+            case "Your PDF library is empty. Add a document to start reading.":
+                return "کتابخانهٔ PDF خالی است. برای شروع مطالعه یک سند اضافه کنید.";
+            case "Your queue is empty. Add tracks with + in the music list.":
+                return "صف پخش خالی است. از فهرست موسیقی آهنگ اضافه کنید.";
+            case "White noise": return "صدای سفید";
+            case "Built-in · study ambience": return "صدای داخلی · مناسب مطالعه";
+            case "+ Add files": return "افزودن فایل";
+            case "Load device music library": return "بارگذاری موسیقی دستگاه";
+            case "Search tracks, artists, albums": return "جست‌وجوی آهنگ، هنرمند یا آلبوم";
+            case "Loading your music library…": return "در حال بارگذاری موسیقی…";
+            case "No matching tracks.": return "آهنگی پیدا نشد.";
+            case "No tracks found. Add audio files from your device.":
+                return "آهنگی پیدا نشد. فایل صوتی اضافه کنید.";
+            case "Allow music access to scan your library, or add individual audio files.":
+                return "برای اسکن کتابخانه اجازه دهید یا فایل صوتی جداگانه اضافه کنید.";
+            case "Set your study and rest rhythm. Changes apply to the next timer.":
+                return "زمان تمرکز و استراحت را تنظیم کنید؛ تغییرات در نوبت بعد اعمال می‌شوند.";
+            case "Save timer settings": return "ذخیرهٔ تنظیمات زمان‌سنج";
+            case "Focus guard · choose distracting apps": return "محافظ تمرکز · انتخاب برنامه‌های مزاحم";
+            case "During-focus system controls": return "کنترل‌های هنگام تمرکز";
+            case "Session behavior": return "رفتار جلسه";
+            case "Manage Accessibility service": return "مدیریت سرویس دسترس‌پذیری";
+            case "No more apps are available to add.": return "برنامهٔ دیگری برای افزودن پیدا نشد.";
+            case "This app is no longer available.": return "این برنامه دیگر در دسترس نیست.";
+            case "This app could not be opened.": return "بازکردن این برنامه ممکن نشد.";
+            case "Remove this app from Quick access?": return "این برنامه از دسترسی سریع حذف شود؟";
+            case "Cancel": return "انصراف";
+            case "Remove": return "حذف";
+            case "Delete": return "پاک‌کردن";
+            case "Reconnect this PDF": return "اتصال دوباره به PDF";
+            case "This cannot be undone.": return "این کار برگشت‌پذیر نیست.";
+            case "Delete this day's note?": return "یادداشت این روز پاک شود؟";
+            case "Open note": return "بازکردن یادداشت";
+            case "Delete note": return "پاک‌کردن یادداشت";
+            case "Timer settings saved.": return "تنظیمات زمان‌سنج ذخیره شد.";
+            case "The PDF file on your device will not be deleted.":
+                return "فایل PDF از دستگاه شما پاک نمی‌شود.";
+            case "Remove from library?": return "از کتابخانه حذف شود؟";
+            case "Enter a valid page number": return "شمارهٔ صفحه معتبر نیست.";
+            case "PDF": return "PDF";
+            case "Do Not Disturb": return "مزاحم نشوید";
+            case "Airplane mode": return "حالت پرواز";
+            case "Continue music": return "ادامهٔ پخش موسیقی";
+            case "Auto-start breaks": return "شروع خودکار استراحت";
+            case "Auto-start focus": return "شروع خودکار تمرکز";
+            case "Gentle end chime": return "صدای پایان ملایم";
+            case "Study time (minutes)": return "مدت تمرکز (دقیقه)";
+            case "Short break (minutes)": return "استراحت کوتاه (دقیقه)";
+            case "Long break (minutes)": return "استراحت بلند (دقیقه)";
+            case "Long break after how many study sessions": return "پس از چند جلسه استراحت بلند باشد";
+            case "Manage Android notification access": return "مدیریت دسترسی اعلان‌های اندروید";
+            case "Keep playback running when a session ends": return "پس از پایان جلسه موسیقی ادامه یابد";
+            case "Start break timers without a confirmation": return "استراحت بدون تأیید شروع شود";
+            case "Continue automatically after a break": return "پس از استراحت تمرکز خودکار شروع شود";
+            case "Play a short cue when a phase ends": return "پایان هر مرحله با یک صدای کوتاه اعلام شود";
+            case "This file provider does not allow persistent access after reopening.":
+                return "دسترسی پایدار به این فایل پس از بستن برنامه ممکن نیست.";
+            case "Added 5 minutes to your focus timer.": return "۵ دقیقه به زمان‌سنج تمرکز اضافه شد.";
+            case "Choose a music file with Add music, or allow library access.":
+                return "یک فایل موسیقی انتخاب کنید یا اجازهٔ دسترسی به کتابخانه را بدهید.";
+            case "Music library access was not granted.": return "اجازهٔ دسترسی به موسیقی داده نشد.";
+            case "This track could not be played. It was removed from the queue.":
+                return "پخش این آهنگ ممکن نشد و از صف حذف شد.";
+            case "Unable to play this audio file.": return "پخش این فایل صوتی ممکن نشد.";
+            case "White noise could not be started on this device.":
+                return "صدای سفید در این دستگاه شروع نشد.";
+            case "Choose a page from 1 to ": return "شمارهٔ صفحه را بین ۱ تا وارد کنید: ";
+            case "Enter a page from 1 to ": return "شمارهٔ صفحه را از ۱ تا ";
+            case "This provider may not keep audio access after Focus closes.":
+                return "ممکن است دسترسی به این فایل صوتی پس از بستن برنامه حفظ نشود.";
+            case "Folder access could not be saved.": return "ذخیرهٔ دسترسی پوشه ممکن نشد.";
+            case "Could not scan this folder. Choose a folder that Focus can access.":
+                return "اسکن پوشه انجام نشد؛ پوشه‌ای را انتخاب کنید که برنامه به آن دسترسی دارد.";
+            case "Add PDF document": return "افزودن سند PDF";
+            case "Unable to render this PDF page.": return "نمایش این صفحهٔ PDF ممکن نشد.";
+            case "Track tags or artwork could not be read.": return "اطلاعات یا تصویر آهنگ خوانده نشد.";
+            case "Track metadata reader could not be closed cleanly.":
+                return "بستن خوانندهٔ اطلاعات آهنگ با خطا روبه‌رو شد.";
+            case "Do Not Disturb controls require Android 6 or newer.":
+                return "کنترل حالت مزاحم‌نشوید به اندروید ۶ یا جدیدتر نیاز دارد.";
+            case "Time remaining in focus session": return "زمان باقی‌مانده از جلسهٔ تمرکز";
+            case "Continue reading ": return "ادامهٔ مطالعهٔ ";
+            case "Open PDF ": return "بازکردن PDF ";
+            case "Play music": return "پخش موسیقی";
+            case "Pause music": return "توقف موسیقی";
+            case "Play": return "پخش";
+            case "Previous track": return "آهنگ قبلی";
+            case "Next track": return "آهنگ بعدی";
+            case "Reset timer": return "بازنشانی زمان‌سنج";
+            case "Choose an app": return "انتخاب برنامه";
+            case "Choose PDF": return "انتخاب PDF";
+            case "Later": return "بعداً";
+            case "Show album": return "نمایش آلبوم";
+            case "Play now": return "پخش";
+            case "Add to queue": return "افزودن به صف";
+            case "Remove from queue": return "حذف از صف";
+            case "Open playback queue with ": return "بازکردن صف پخش با ";
+            case "Choose distracting apps to return to your home screen during an active Pomodoro. Enable the Accessibility service below to use this optional feature.":
+                return "برنامه‌های مزاحم را انتخاب کنید تا هنگام تمرکز به صفحهٔ خانه بازگردید. برای استفاده، سرویس دسترس‌پذیری را فعال کنید.";
+            case "Service enabled": return "سرویس فعال است";
+            case "Service not enabled": return "سرویس فعال نیست";
+            case "Block these apps while your timer is running": return "هنگام اجرای زمان‌سنج این برنامه‌ها مسدود شوند";
+            case "This PDF could not be opened.": return "بازکردن PDF ممکن نشد.";
+            case "Study session": return "جلسهٔ تمرکز";
+            case "Short break": return "استراحت کوتاه";
+            case "Long break": return "استراحت بلند";
+            default:
+                if (value.startsWith("Queue ")) return "صف پخش · " + persianDigits(value.substring(6));
+                return value;
+        }
     }
 
     private MaterialButton iconButton(int icon, String description, Runnable action) {
         MaterialButton button = new MaterialButton(this);
         button.setText("");
+        if (appTypeface != null) button.setTypeface(appTypeface);
         button.setIconResource(icon);
         button.setIconGravity(MaterialButton.ICON_GRAVITY_TEXT_START);
         button.setIconTint(android.content.res.ColorStateList.valueOf(Color.WHITE));
@@ -292,9 +533,10 @@ public class MainActivity extends AppCompatActivity {
         button.setMinimumWidth(dp(ICON_TARGET_DP));
         button.setMinHeight(dp(ICON_TARGET_DP));
         button.setMinimumHeight(dp(ICON_TARGET_DP));
+        button.setGravity(Gravity.CENTER);
         button.setPadding(0, 0, 0, 0);
         button.setCornerRadius(dp(ICON_TARGET_DP / 2f));
-        button.setContentDescription(description);
+        button.setContentDescription(fa(description));
         button.setBackgroundTintList(android.content.res.ColorStateList.valueOf(Color.rgb(47, 51, 62)));
         button.setOnClickListener(v -> action.run());
         return button;
@@ -328,7 +570,7 @@ public class MainActivity extends AppCompatActivity {
         MaterialButton back = iconButton(R.drawable.ic_arrow_back, "Back", this::navigateBack);
         header.addView(back);
         TextView heading = text(title, 22, Color.WHITE);
-        heading.setTypeface(null, Typeface.BOLD);
+        heading.setTypeface(appTypeface, Typeface.BOLD);
         LinearLayout.LayoutParams titleParams = new LinearLayout.LayoutParams(0, -2, 1);
         titleParams.leftMargin = dp(12);
         header.addView(heading, titleParams);
@@ -356,6 +598,10 @@ public class MainActivity extends AppCompatActivity {
     }
 
     private void setScreenContent(View root, boolean withNavigation) {
+        miniPlayerTitle = null;
+        miniPlayerArtist = null;
+        miniPlayerArtwork = null;
+        miniPlayerPlayButton = null;
         int left = root.getPaddingLeft();
         int top = root.getPaddingTop();
         int right = root.getPaddingRight();
@@ -366,16 +612,75 @@ public class MainActivity extends AppCompatActivity {
                     right + systemBars.right, bottom + systemBars.bottom);
             return insets;
         });
+        root.setLayoutDirection(View.LAYOUT_DIRECTION_RTL);
         if (!withNavigation) {
             setContentView(root);
             return;
         }
         FrameLayout shell = new FrameLayout(this);
         FrameLayout.LayoutParams contentParams = new FrameLayout.LayoutParams(-1, -1);
-        contentParams.bottomMargin = dp(72);
+        contentParams.bottomMargin = dp(144);
         shell.addView(root, contentParams);
-        shell.addView(bottomNavigation(), new FrameLayout.LayoutParams(-1, dp(72), Gravity.BOTTOM));
+        MaterialCardView miniPlayer = miniPlayer();
+        FrameLayout.LayoutParams miniPlayerParams = new FrameLayout.LayoutParams(-1, dp(64),
+                Gravity.BOTTOM);
+        miniPlayerParams.leftMargin = dp(8);
+        miniPlayerParams.rightMargin = dp(8);
+        miniPlayerParams.bottomMargin = dp(76);
+        shell.addView(miniPlayer, miniPlayerParams);
+        FrameLayout.LayoutParams navigationParams = new FrameLayout.LayoutParams(-1, dp(72), Gravity.BOTTOM);
+        shell.addView(bottomNavigation(), navigationParams);
+        ViewCompat.setOnApplyWindowInsetsListener(shell, (view, insets) -> {
+            Insets systemBars = insets.getInsets(WindowInsetsCompat.Type.systemBars());
+            contentParams.bottomMargin = dp(144) + systemBars.bottom;
+            miniPlayerParams.bottomMargin = dp(76) + systemBars.bottom;
+            navigationParams.bottomMargin = systemBars.bottom;
+            root.setPadding(left + systemBars.left, top + systemBars.top,
+                    right + systemBars.right, bottom + systemBars.bottom);
+            shell.requestLayout();
+            return insets;
+        });
         setContentView(shell);
+        refreshMiniPlayer();
+    }
+
+    private MaterialCardView miniPlayer() {
+        MaterialCardView playerCard = card();
+        playerCard.setRadius(dp(16));
+        playerCard.setCardElevation(dp(4));
+        LinearLayout player = row();
+        player.setPadding(dp(8), dp(4), dp(4), dp(4));
+        miniPlayerArtwork = new ImageView(this);
+        miniPlayerArtwork.setScaleType(ImageView.ScaleType.CENTER_CROP);
+        miniPlayerArtwork.setBackground(makeArtworkBackground());
+        player.addView(miniPlayerArtwork, new LinearLayout.LayoutParams(dp(42), dp(42)));
+
+        LinearLayout details = column();
+        details.setGravity(Gravity.CENTER_VERTICAL);
+        miniPlayerTitle = text(currentTrackTitle(), 12, Color.WHITE);
+        miniPlayerTitle.setSingleLine(true);
+        miniPlayerTitle.setEllipsize(android.text.TextUtils.TruncateAt.END);
+        details.addView(miniPlayerTitle);
+        miniPlayerArtist = text(currentTrackArtist(), 10, Color.LTGRAY);
+        miniPlayerArtist.setSingleLine(true);
+        miniPlayerArtist.setEllipsize(android.text.TextUtils.TruncateAt.END);
+        details.addView(miniPlayerArtist);
+        LinearLayout.LayoutParams detailsParams = new LinearLayout.LayoutParams(0, -1, 1);
+        detailsParams.leftMargin = dp(8);
+        player.addView(details, detailsParams);
+
+        MaterialButton previous = iconButton(R.drawable.ic_skip_previous, "Previous track", this::playPrevious);
+        player.addView(previous, new LinearLayout.LayoutParams(dp(48), dp(48)));
+        miniPlayerPlayButton = iconButton(
+                isAudioPlaying() ? R.drawable.ic_pause : R.drawable.ic_play_arrow,
+                isAudioPlaying() ? "Pause music" : "Play music", this::togglePlayback);
+        player.addView(miniPlayerPlayButton, new LinearLayout.LayoutParams(dp(48), dp(48)));
+        MaterialButton next = iconButton(R.drawable.ic_skip_next, "Next track", this::playNext);
+        player.addView(next, new LinearLayout.LayoutParams(dp(48), dp(48)));
+        playerCard.addView(player);
+        playerCard.setOnClickListener(v -> showMusic());
+        playerCard.setContentDescription("Open music player");
+        return playerCard;
     }
 
     private LinearLayout bottomNavigation() {
@@ -384,10 +689,11 @@ public class MainActivity extends AppCompatActivity {
         navigation.setBackgroundColor(Color.rgb(24, 26, 33));
         navigation.setElevation(dp(8));
         navigation.setMinimumHeight(dp(72));
-        addNavigationItem(navigation, R.drawable.ic_focus, "Timer", "home", this::buildHome);
-        addNavigationItem(navigation, R.drawable.ic_picture_as_pdf, "PDFs", "PDF library", this::showPdfLibrary);
-        addNavigationItem(navigation, R.drawable.ic_music_note, "Music", "Music", this::showMusic);
-        addNavigationItem(navigation, R.drawable.ic_edit, "Notes", "Notes", this::showNotes);
+        addNavigationItem(navigation, R.drawable.ic_focus, "تمرکز", "home", this::buildHome);
+        addNavigationItem(navigation, R.drawable.ic_edit, "یادداشت", "Notes", this::showNotes);
+        addNavigationItem(navigation, R.drawable.ic_notifications, "یادآورها", "Reminders", this::showReminders);
+        addNavigationItem(navigation, R.drawable.ic_picture_as_pdf, "PDF", "PDF library", this::showPdfLibrary);
+        addNavigationItem(navigation, R.drawable.ic_music_note, "موسیقی", "Music", this::showMusic);
         return navigation;
     }
 
@@ -396,21 +702,39 @@ public class MainActivity extends AppCompatActivity {
         LinearLayout item = column();
         item.setGravity(Gravity.CENTER);
         item.setMinimumHeight(dp(72));
-        item.setContentDescription(label);
+        item.setPadding(dp(4), 0, dp(4), 0);
+        item.setContentDescription(fa(label));
         item.setClickable(true);
         item.setFocusable(true);
         item.setImportantForAccessibility(View.IMPORTANT_FOR_ACCESSIBILITY_YES);
         if (Build.VERSION.SDK_INT >= 28) item.setAccessibilityPaneTitle(label);
         boolean selected = activeScreen.equals(destination)
                 || "home".equals(destination) && activeScreen.equals("home");
-        item.setBackgroundColor(selected ? Color.rgb(38, 40, 51) : Color.TRANSPARENT);
+        android.graphics.drawable.GradientDrawable rippleContent = new android.graphics.drawable.GradientDrawable();
+        rippleContent.setColor(Color.TRANSPARENT);
+        rippleContent.setCornerRadius(dp(20));
+        item.setBackground(new android.graphics.drawable.RippleDrawable(
+                android.content.res.ColorStateList.valueOf(0x3360B4E6), rippleContent, null));
+        FrameLayout iconContainer = new FrameLayout(this);
+        android.graphics.drawable.GradientDrawable iconBackground = new android.graphics.drawable.GradientDrawable();
+        iconBackground.setColor(selected ? Color.rgb(38, 40, 51) : Color.TRANSPARENT);
+        iconBackground.setCornerRadius(dp(18));
+        iconContainer.setBackground(iconBackground);
+        LinearLayout.LayoutParams iconContainerParams = new LinearLayout.LayoutParams(dp(60), dp(32));
+        item.addView(iconContainer, iconContainerParams);
         ImageView iconView = new ImageView(this);
         iconView.setImageResource(icon);
-        int foreground = selected ? Color.rgb(166, 161, 255) : Color.rgb(178, 182, 193);
+        int foreground = selected ? Color.rgb(60, 180, 230) : Color.rgb(178, 182, 193);
         iconView.setImageTintList(android.content.res.ColorStateList.valueOf(foreground));
-        item.addView(iconView, new LinearLayout.LayoutParams(dp(24), dp(24)));
+        FrameLayout.LayoutParams iconParams = new FrameLayout.LayoutParams(dp(24), dp(24), Gravity.CENTER);
+        iconContainer.addView(iconView, iconParams);
         TextView text = text(label, 11, foreground);
-        item.addView(text);
+        text.setGravity(Gravity.CENTER);
+        text.setSingleLine(true);
+        text.setEllipsize(android.text.TextUtils.TruncateAt.END);
+        LinearLayout.LayoutParams labelParams = new LinearLayout.LayoutParams(-1, dp(20));
+        labelParams.topMargin = dp(3);
+        item.addView(text, labelParams);
         item.setOnClickListener(v -> action.run());
         parent.addView(item, new LinearLayout.LayoutParams(0, dp(72), 1));
     }
@@ -431,19 +755,30 @@ public class MainActivity extends AppCompatActivity {
         LinearLayout content = column();
         content.setPadding(dp(20), dp(20), dp(20), dp(20));
         LinearLayout brand = row();
-        TextView greeting = text("FOCUS", 13, Color.rgb(166, 161, 255));
+        TextView greeting = text("تمرکز", 13, Color.rgb(60, 180, 230));
         greeting.setLetterSpacing(0.18f);
         brand.addView(greeting, new LinearLayout.LayoutParams(0, -2, 1));
         MaterialButton settings = iconButton(R.drawable.ic_settings,
                 "Pomodoro and focus guard settings", this::showPomodoroSettings);
         brand.addView(settings);
         content.addView(brand);
-        TextView title = text("Make room for what matters.", 22, Color.WHITE);
-        title.setTypeface(null, Typeface.BOLD);
+        TextView title = text("برای کارهای مهم وقت بساز.", 22, Color.WHITE);
+        title.setTypeface(appTypeface, Typeface.BOLD);
         LinearLayout.LayoutParams titleMargin = new LinearLayout.LayoutParams(-1, -2);
         titleMargin.topMargin = dp(6);
         titleMargin.bottomMargin = dp(14);
         content.addView(title, titleMargin);
+        TextView dateLabel = text(todayDateLabel(), 13, Color.LTGRAY);
+        dateLabel.setGravity(Gravity.CENTER);
+        dateLabel.setPadding(dp(12), dp(10), dp(12), dp(10));
+        dateLabel.setBackgroundResource(android.R.drawable.list_selector_background);
+        dateLabel.setClickable(true);
+        dateLabel.setFocusable(true);
+        dateLabel.setContentDescription("انتخاب تاریخ و مشاهدهٔ یادداشت همان روز");
+        dateLabel.setOnClickListener(v -> showDatePickerForNotes());
+        LinearLayout.LayoutParams dateParams = new LinearLayout.LayoutParams(-1, -2);
+        dateParams.bottomMargin = dp(14);
+        content.addView(dateLabel, dateParams);
 
         MaterialCardView timerCard = card();
         LinearLayout timerContent = column();
@@ -459,7 +794,7 @@ public class MainActivity extends AppCompatActivity {
         timerText.setTypeface(Typeface.create("sans-serif-light", Typeface.NORMAL));
         timerText.setGravity(Gravity.CENTER);
         timerText.setImportantForAccessibility(View.IMPORTANT_FOR_ACCESSIBILITY_NO);
-        timerText.setContentDescription("Time remaining in focus session");
+        timerText.setContentDescription(fa("Time remaining in focus session"));
         clock.addView(timerText, new FrameLayout.LayoutParams(-1, -1));
         LinearLayout.LayoutParams clockParams = new LinearLayout.LayoutParams(-1, dp(166));
         clockParams.topMargin = dp(2);
@@ -469,7 +804,7 @@ public class MainActivity extends AppCompatActivity {
         duration.setOnClickListener(v -> showPomodoroSettings());
         timerContent.setOnClickListener(v -> showPomodoroSettings());
         timerButton = button("");
-        timerButton.setBackgroundTintList(android.content.res.ColorStateList.valueOf(Color.rgb(108, 99, 255)));
+        timerButton.setBackgroundTintList(android.content.res.ColorStateList.valueOf(Color.rgb(34, 158, 217)));
         LinearLayout.LayoutParams startParams = new LinearLayout.LayoutParams(dp(170), dp(52));
         startParams.topMargin = dp(10);
         timerContent.addView(timerButton, startParams);
@@ -512,9 +847,11 @@ public class MainActivity extends AppCompatActivity {
         LinearLayout.LayoutParams statsParams = new LinearLayout.LayoutParams(-1, -2);
         statsParams.bottomMargin = dp(12);
         content.addView(stats, statsParams);
+        addExamTimerCard(content);
+        addUpcomingTasks(content);
 
-        TextView shortcutsTitle = text("QUICK ACCESS", 11, Color.rgb(166, 161, 255));
-        shortcutsTitle.setTypeface(null, Typeface.BOLD);
+        TextView shortcutsTitle = text("دسترسی سریع", 12, Color.rgb(60, 180, 230));
+        shortcutsTitle.setTypeface(appTypeface, Typeface.BOLD);
         shortcutsTitle.setLetterSpacing(0.08f);
         LinearLayout.LayoutParams shortcutsTitleParams = new LinearLayout.LayoutParams(-1, -2);
         shortcutsTitleParams.bottomMargin = dp(8);
@@ -523,6 +860,8 @@ public class MainActivity extends AppCompatActivity {
         actions.setColumnCount(2);
         actions.setUseDefaultMargins(false);
         for (HomeShortcut shortcut : homeShortcuts()) addAction(actions, shortcut);
+        addAction(actions, new HomeShortcut("یادآورها", R.drawable.ic_notifications, this::showReminders, null));
+        addAction(actions, new HomeShortcut("تایمر آزمون", R.drawable.ic_focus, this::showExamTimer, null));
         addAction(actions, new HomeShortcut("Add shortcut", R.drawable.ic_add, null, null));
         LinearLayout.LayoutParams actionsParams = new LinearLayout.LayoutParams(-1, -2);
         actionsParams.bottomMargin = dp(16);
@@ -534,7 +873,7 @@ public class MainActivity extends AppCompatActivity {
         recentContent.setPadding(dp(15), dp(13), dp(15), dp(13));
         ImageView pdfIcon = new ImageView(this);
         pdfIcon.setImageResource(R.drawable.ic_picture_as_pdf);
-        pdfIcon.setImageTintList(android.content.res.ColorStateList.valueOf(Color.rgb(166, 161, 255)));
+        pdfIcon.setImageTintList(android.content.res.ColorStateList.valueOf(Color.rgb(60, 180, 230)));
         pdfIcon.setContentDescription("PDF");
         pdfIcon.setLayoutParams(new LinearLayout.LayoutParams(dp(24), dp(24)));
         recentContent.addView(pdfIcon);
@@ -550,7 +889,7 @@ public class MainActivity extends AppCompatActivity {
         LinearLayout.LayoutParams recentDetailsParams = new LinearLayout.LayoutParams(0, -2, 1);
         recentDetailsParams.leftMargin = dp(12);
         recentContent.addView(recentDetails, recentDetailsParams);
-        recentContent.addView(text(lastPdfStatus, 12, Color.rgb(166, 161, 255)));
+        recentContent.addView(text(lastPdfStatus, 12, Color.rgb(60, 180, 230)));
         recent.addView(recentContent);
         recent.setMinimumHeight(dp(72));
         recent.setClickable(true);
@@ -603,13 +942,16 @@ public class MainActivity extends AppCompatActivity {
 
     private List<HomeShortcut> homeShortcuts() {
         List<HomeShortcut> shortcuts = new ArrayList<>();
-        shortcuts.add(new HomeShortcut("Notes", R.drawable.ic_edit, this::showNotes, null));
-        shortcuts.add(new HomeShortcut("Music", R.drawable.ic_music_note, this::showMusic, null));
-        shortcuts.add(new HomeShortcut("PDF library", R.drawable.ic_picture_as_pdf, this::showPdfLibrary, null));
+        shortcuts.add(new HomeShortcut("ماشین‌حساب", R.drawable.ic_calculator, this::launchCalculator, null));
+        shortcuts.add(new HomeShortcut("یادداشت‌ها", R.drawable.ic_edit, this::showNotes, null));
+        shortcuts.add(new HomeShortcut("موسیقی", R.drawable.ic_music_note, this::showMusic, null));
+        shortcuts.add(new HomeShortcut("کتابخانهٔ PDF", R.drawable.ic_picture_as_pdf, this::showPdfLibrary, null));
+        String calculatorPackage = findCalculatorPackage();
         Set<String> installedPackages = new LinkedHashSet<>(
                 prefs.getStringSet(HOME_APP_SHORTCUTS, Collections.emptySet()));
         Set<String> unavailablePackages = new HashSet<>();
         for (String packageName : installedPackages) {
+            if (packageName.equals(calculatorPackage)) continue;
             Intent launchIntent = getPackageManager().getLaunchIntentForPackage(packageName);
             if (launchIntent == null) {
                 unavailablePackages.add(packageName);
@@ -631,6 +973,38 @@ public class MainActivity extends AppCompatActivity {
         return shortcuts;
     }
 
+    @Nullable
+    private String findCalculatorPackage() {
+        Intent intent = new Intent(Intent.ACTION_MAIN).addCategory(Intent.CATEGORY_LAUNCHER);
+        for (ResolveInfo app : getPackageManager().queryIntentActivities(intent, 0)) {
+            String label = String.valueOf(app.loadLabel(getPackageManager())).toLowerCase(Locale.ROOT);
+            if (label.contains("calculator") || label.contains("calc") || label.contains("ماشین")
+                    || label.contains("حسابگر") || label.contains("الحاسبة")) {
+                return app.activityInfo.packageName;
+            }
+        }
+        return null;
+    }
+
+    private void launchCalculator() {
+        String packageName = findCalculatorPackage();
+        if (packageName != null) {
+            launchShortcut(packageName);
+            return;
+        }
+        Intent calculator = new Intent(Intent.ACTION_MAIN).addCategory("android.intent.category.APP_CALCULATOR");
+        ResolveInfo handler = getPackageManager().resolveActivity(calculator, PackageManager.MATCH_DEFAULT_ONLY);
+        if (handler != null) {
+            try {
+                startActivity(calculator);
+                return;
+            } catch (android.content.ActivityNotFoundException | SecurityException e) {
+                android.util.Log.w("FocusShortcuts", "Unable to launch the system calculator.", e);
+            }
+        }
+        Toast.makeText(this, "ماشین‌حسابی روی دستگاه پیدا نشد.", Toast.LENGTH_SHORT).show();
+    }
+
     private void addAction(GridLayout parent, HomeShortcut shortcut) {
         MaterialCardView item = new MaterialCardView(this);
         item.setRadius(dp(16));
@@ -640,7 +1014,7 @@ public class MainActivity extends AppCompatActivity {
         item.setCardBackgroundColor(Color.rgb(29, 32, 40));
         item.setClickable(true);
         item.setFocusable(true);
-        item.setContentDescription(shortcut.label);
+        item.setContentDescription(fa(shortcut.label));
         item.setMinimumHeight(dp(92));
 
         LinearLayout content = column();
@@ -657,7 +1031,7 @@ public class MainActivity extends AppCompatActivity {
             }
         }
         if (shortcut.packageName == null) {
-            glyph.setImageTintList(android.content.res.ColorStateList.valueOf(Color.rgb(166, 161, 255)));
+            glyph.setImageTintList(android.content.res.ColorStateList.valueOf(Color.rgb(60, 180, 230)));
         }
         glyph.setImportantForAccessibility(View.IMPORTANT_FOR_ACCESSIBILITY_NO);
         content.addView(glyph, new LinearLayout.LayoutParams(dp(22), dp(22)));
@@ -768,7 +1142,7 @@ public class MainActivity extends AppCompatActivity {
     private android.graphics.drawable.Drawable makeArtworkBackground() {
         android.graphics.drawable.GradientDrawable drawable = new android.graphics.drawable.GradientDrawable(
                 android.graphics.drawable.GradientDrawable.Orientation.TL_BR,
-                new int[]{Color.rgb(108, 99, 255), Color.rgb(55, 177, 161)});
+                new int[]{Color.rgb(34, 158, 217), Color.rgb(55, 177, 161)});
         drawable.setCornerRadius(dp(8));
         return drawable;
     }
@@ -776,17 +1150,17 @@ public class MainActivity extends AppCompatActivity {
     private void updateTimerDisplay() {
         if (timerText == null || timerButton == null || timerProgress == null) return;
         long seconds = Math.max(0, (remainingMillis + 999) / 1000);
-        timerText.setText(String.format(Locale.getDefault(), "%02d:%02d", seconds / 60, seconds % 60));
+        timerText.setText(persianDigits(String.format(Locale.US, "%02d:%02d", seconds / 60, seconds % 60)));
         timerProgress.setProgress(remainingMillis, durationMillis);
-        timerButton.setText(timerRunning ? "Pause" : remainingMillis < durationMillis ? "Resume" : "Start");
-        timerButton.setContentDescription(timerRunning ? "Pause timer" : "Start or resume timer");
+        timerButton.setText(fa(timerRunning ? "Pause" : remainingMillis < durationMillis ? "Resume" : "Start"));
+        timerButton.setContentDescription(fa(timerRunning ? "Pause timer" : "Start or resume timer"));
         if (timerStatus != null) timerStatus.setText(phaseTitle(timerPhase).toUpperCase(Locale.getDefault()));
         if (statsSummary != null) statsSummary.setText(todayStatsText());
         if (readerTimerLabel != null) readerTimerLabel.setText(getString(
                 R.string.reader_timer_status, phaseTitle(timerPhase), timerText.getText()));
         if (readerTimerButton != null) {
             readerTimerButton.setIconResource(timerRunning ? R.drawable.ic_pause : R.drawable.ic_play_arrow);
-            readerTimerButton.setContentDescription(timerRunning ? "Pause Pomodoro timer" : "Resume Pomodoro timer");
+            readerTimerButton.setContentDescription(fa(timerRunning ? "Pause timer" : "Start or resume timer"));
         }
     }
 
@@ -894,6 +1268,18 @@ public class MainActivity extends AppCompatActivity {
         blockerParams.topMargin = dp(8);
         body.addView(blocker, blockerParams);
         blocker.setOnClickListener(v -> showFocusGuard());
+        LinearLayout diagnosticsActions = row();
+        LinearLayout.LayoutParams diagnosticsParams = new LinearLayout.LayoutParams(-1, dp(48));
+        diagnosticsParams.topMargin = dp(8);
+        MaterialButton copyDiagnostics = button("کپی گزارش خطا");
+        diagnosticsActions.addView(copyDiagnostics, new LinearLayout.LayoutParams(0, -1, 1));
+        copyDiagnostics.setOnClickListener(v -> copyDiagnostics());
+        MaterialButton shareDiagnostics = button("ارسال گزارش");
+        LinearLayout.LayoutParams shareParams = new LinearLayout.LayoutParams(0, -1, 1);
+        shareParams.leftMargin = dp(8);
+        diagnosticsActions.addView(shareDiagnostics, shareParams);
+        shareDiagnostics.setOnClickListener(v -> shareDiagnostics());
+        body.addView(diagnosticsActions, diagnosticsParams);
         TextView quietLabel = text("During-focus system controls", 15, Color.WHITE);
         LinearLayout.LayoutParams quietParams = new LinearLayout.LayoutParams(-1, -2);
         quietParams.topMargin = dp(18);
@@ -912,6 +1298,60 @@ public class MainActivity extends AppCompatActivity {
         body.addView(preferenceSwitch("Auto-start focus", "Continue automatically after a break", "auto_start_focus", false));
         body.addView(preferenceSwitch("Gentle end chime", "Play a short cue when a phase ends", "session_chime", true));
         showScreen("Pomodoro settings", scroll(body));
+    }
+
+    private void shareDiagnostics() {
+        File report = AppDiagnostics.getLogFile();
+        if (report == null || !report.isFile()) {
+            Toast.makeText(this, "هنوز گزارشی برای ارسال ثبت نشده است.", Toast.LENGTH_SHORT).show();
+            return;
+        }
+        try {
+            Uri reportUri = androidx.core.content.FileProvider.getUriForFile(
+                    this, getPackageName() + ".fileprovider", report);
+            Intent share = new Intent(Intent.ACTION_SEND)
+                    .setType("text/plain")
+                    .putExtra(Intent.EXTRA_SUBJECT, "Focus app diagnostics")
+                    .putExtra(Intent.EXTRA_TEXT, "گزارش فنی برنامهٔ Focus پیوست شده است.")
+                    .putExtra(Intent.EXTRA_STREAM, reportUri)
+                    .addFlags(Intent.FLAG_GRANT_READ_URI_PERMISSION);
+            share.setClipData(android.content.ClipData.newUri(
+                    getContentResolver(), "Focus diagnostics", reportUri));
+            startActivity(Intent.createChooser(share, "ارسال گزارش خطا"));
+        } catch (RuntimeException e) {
+            android.util.Log.e("FocusDiagnostics", "Unable to share diagnostics report.", e);
+            Toast.makeText(this, "آماده‌سازی گزارش خطا ممکن نشد.", Toast.LENGTH_LONG).show();
+        }
+    }
+
+    private void copyDiagnostics() {
+        File report = AppDiagnostics.getLogFile();
+        if (report == null || !report.isFile()) {
+            Toast.makeText(this, "هنوز گزارشی برای کپی‌کردن ثبت نشده است.", Toast.LENGTH_SHORT).show();
+            return;
+        }
+        try {
+            java.io.ByteArrayOutputStream contentsBuffer = new java.io.ByteArrayOutputStream();
+            try (java.io.FileInputStream input = new java.io.FileInputStream(report)) {
+                byte[] buffer = new byte[8192];
+                int count;
+                while ((count = input.read(buffer)) != -1) contentsBuffer.write(buffer, 0, count);
+            }
+            String contents = new String(contentsBuffer.toByteArray(), "UTF-8");
+            android.content.ClipboardManager clipboard =
+                    (android.content.ClipboardManager) getSystemService(CLIPBOARD_SERVICE);
+            if (clipboard == null) {
+                Toast.makeText(this, "دسترسی به کلیپ‌بورد ممکن نشد.", Toast.LENGTH_LONG).show();
+                return;
+            }
+            clipboard.setPrimaryClip(android.content.ClipData.newPlainText(
+                    "Focus diagnostics", contents));
+            Toast.makeText(this, "گزارش خطا کپی شد؛ آن را اینجا جای‌گذاری کنید.",
+                    Toast.LENGTH_LONG).show();
+        } catch (IOException | RuntimeException e) {
+            android.util.Log.e("FocusDiagnostics", "Unable to copy diagnostics report.", e);
+            Toast.makeText(this, "کپی گزارش خطا ممکن نشد.", Toast.LENGTH_LONG).show();
+        }
     }
 
     private LinearLayout preferenceSwitch(String title, String description, String key, boolean defaultValue) {
@@ -983,7 +1423,7 @@ public class MainActivity extends AppCompatActivity {
         input.setSingleLine(true);
         input.setTextColor(Color.WHITE);
         input.setHintTextColor(Color.GRAY);
-        input.setHint(hint);
+        input.setHint(fa(hint));
         input.setText(String.valueOf(value));
         return input;
     }
@@ -1009,9 +1449,9 @@ public class MainActivity extends AppCompatActivity {
     }
 
     private String phaseTitle(String phase) {
-        if ("long_break".equals(phase)) return "Long break";
-        if ("short_break".equals(phase)) return "Short break";
-        return "Study session";
+        if ("long_break".equals(phase)) return "استراحت بلند";
+        if ("short_break".equals(phase)) return "استراحت کوتاه";
+        return "جلسهٔ تمرکز";
     }
 
     private String nextPhase(String completedPhase) {
@@ -1064,14 +1504,16 @@ public class MainActivity extends AppCompatActivity {
         long hours = totalMinutes / 60;
         long minutes = totalMinutes % 60;
         int goal = prefs.getInt("long_break_interval", 4);
-        return "TODAY  ·  " + sessions + "/" + goal + " pomodoros  ·  "
-                + (hours > 0 ? hours + "h " : "") + minutes + "m study";
+        return "امروز · " + persianDigits(sessions) + "/" + persianDigits(goal)
+                + " جلسه · " + (hours > 0 ? persianDigits(hours) + "ساعت " : "")
+                + persianDigits(minutes) + " دقیقه تمرکز";
     }
 
     private void appendPomodoroNote() {
         String key = noteKey(todayKey());
         String old = prefs.getString(key, "");
-        String entry = "• Pomodoro completed — " + new SimpleDateFormat("h:mm a", Locale.getDefault()).format(new Date());
+        String entry = "• جلسهٔ تمرکز کامل شد — "
+                + persianDigits(new SimpleDateFormat("HH:mm", Locale.US).format(new Date()));
         prefs.edit().putString(key, old.trim().isEmpty() ? entry : old + "\n" + entry).apply();
     }
 
@@ -1087,14 +1529,14 @@ public class MainActivity extends AppCompatActivity {
         LinearLayout list = column();
         list.setPadding(0, dp(8), 0, dp(12));
         LinearLayout notesToolbar = row();
-        TextView noteHeading = text("Your days", 15, Color.WHITE);
+        TextView noteHeading = text("یادداشت‌های روزانه", 17, Color.WHITE);
         notesToolbar.addView(noteHeading, new LinearLayout.LayoutParams(0, -2, 1));
-        MaterialButton addToday = button("+ Today");
+        MaterialButton addToday = button("یادداشت امروز");
         addToday.setMinHeight(dp(48));
         addToday.setOnClickListener(v -> showNoteEditor(todayKey()));
         notesToolbar.addView(addToday);
         list.addView(notesToolbar);
-        TextView hint = text("One note for each day · changes save as you type", 12, Color.LTGRAY);
+        TextView hint = text("متن کامل هر یادداشت و کارهای همان روز را همین‌جا ببینید.", 12, Color.LTGRAY);
         LinearLayout.LayoutParams hintParams = new LinearLayout.LayoutParams(-1, -2);
         hintParams.topMargin = dp(4);
         hintParams.bottomMargin = dp(10);
@@ -1102,46 +1544,43 @@ public class MainActivity extends AppCompatActivity {
         List<String> dates = new ArrayList<>();
         for (Map.Entry<String, ?> entry : prefs.getAll().entrySet()) {
             if (entry.getKey().startsWith("note:")) dates.add(entry.getKey().substring(5));
+            else if (entry.getKey().startsWith(TASKS_PREFIX)) {
+                dates.add(entry.getKey().substring(TASKS_PREFIX.length()));
+            }
         }
         if (!dates.contains(todayKey())) dates.add(todayKey());
         Collections.sort(dates, Collections.reverseOrder());
+        Set<String> uniqueDates = new LinkedHashSet<>(dates);
         for (String date : dates) {
+            if (!uniqueDates.remove(date)) continue;
             MaterialCardView noteCard = card();
-            LinearLayout noteContent = row();
-            noteContent.setPadding(dp(14), dp(12), dp(12), dp(12));
-            TextView dateBadge = text(new SimpleDateFormat("dd", Locale.getDefault()).format(parseDay(date)),
-                    20, Color.rgb(166, 161, 255));
-            dateBadge.setGravity(Gravity.CENTER);
-            noteContent.addView(dateBadge, new LinearLayout.LayoutParams(dp(42), dp(42)));
-            LinearLayout noteDetails = column();
-            TextView dateTitle = text(prettyDate(date), 14, Color.WHITE);
-            dateTitle.setMaxLines(1);
-            dateTitle.setEllipsize(android.text.TextUtils.TruncateAt.END);
-            noteDetails.addView(dateTitle);
+            LinearLayout noteContent = column();
+            noteContent.setPadding(dp(16), dp(14), dp(16), dp(14));
+            TextView dateTitle = text(prettyDate(date), 14, Color.rgb(60, 180, 230));
+            dateTitle.setTypeface(appTypeface, Typeface.BOLD);
+            noteContent.addView(dateTitle);
             String note = prefs.getString(noteKey(date), "");
-            String preview = note.trim().isEmpty() ? "No note yet · tap to write" : note.trim().replace('\n', ' ');
-            TextView previewText = text(preview, 12, Color.LTGRAY);
-            previewText.setMaxLines(1);
-            previewText.setEllipsize(android.text.TextUtils.TruncateAt.END);
-            LinearLayout.LayoutParams previewParams = new LinearLayout.LayoutParams(-1, -2);
-            previewParams.topMargin = dp(4);
-            noteDetails.addView(previewText, previewParams);
-            LinearLayout.LayoutParams detailsParams = new LinearLayout.LayoutParams(0, -2, 1);
-            detailsParams.leftMargin = dp(10);
-            noteContent.addView(noteDetails, detailsParams);
-            ImageView chevron = new ImageView(this);
-            chevron.setImageResource(R.drawable.ic_chevron_right);
-            chevron.setImageTintList(android.content.res.ColorStateList.valueOf(Color.LTGRAY));
-            noteContent.addView(chevron, new LinearLayout.LayoutParams(dp(24), dp(24)));
+            TextView noteBody = text(note.trim().isEmpty() ? "هنوز یادداشتی برای این روز ثبت نشده است." : note,
+                    14, note.trim().isEmpty() ? Color.GRAY : Color.WHITE);
+            noteBody.setLineSpacing(dp(3), 1f);
+            noteBody.setPadding(0, dp(10), 0, dp(10));
+            noteBody.setOnClickListener(v -> showNoteEditor(date));
+            noteContent.addView(noteBody);
+            LinearLayout taskHeader = row();
+            TextView taskTitle = text("کارهای این روز", 13, Color.WHITE);
+            taskTitle.setTypeface(appTypeface, Typeface.BOLD);
+            taskHeader.addView(taskTitle, new LinearLayout.LayoutParams(0, -2, 1));
+            MaterialButton addTask = button("+ کار");
+            addTask.setMinHeight(dp(40));
+            addTask.setOnClickListener(v -> showTaskEditor(date, null));
+            taskHeader.addView(addTask);
+            noteContent.addView(taskHeader);
+            addTaskRows(noteContent, loadTasks(date), date, false);
             noteCard.addView(noteContent);
-            noteCard.setMinimumHeight(dp(72));
-            noteCard.setClickable(true);
-            noteCard.setFocusable(true);
-            noteCard.setContentDescription(prettyDate(date) + ". " + preview);
-            noteCard.setOnClickListener(v -> showNoteEditor(date));
+            noteCard.setContentDescription(prettyDate(date) + ". " + noteBody.getText());
             noteCard.setOnLongClickListener(v -> {
                 new MaterialAlertDialogBuilder(this).setTitle(prettyDate(date))
-                        .setItems(new String[]{"Open note", "Delete note"}, (dialog, which) -> {
+                        .setItems(new String[]{"ویرایش یادداشت", "پاک‌کردن یادداشت"}, (dialog, which) -> {
                             if (which == 0) showNoteEditor(date);
                             else new MaterialAlertDialogBuilder(this).setTitle("Delete this day's note?")
                                     .setMessage("This cannot be undone.")
@@ -1153,8 +1592,22 @@ public class MainActivity extends AppCompatActivity {
                         }).show();
                 return true;
             });
+            noteBody.setOnLongClickListener(v -> {
+                new MaterialAlertDialogBuilder(this).setTitle(prettyDate(date))
+                        .setItems(new String[]{"ویرایش یادداشت", "پاک‌کردن یادداشت"}, (dialog, which) -> {
+                            if (which == 0) showNoteEditor(date);
+                            else new MaterialAlertDialogBuilder(this)
+                                    .setTitle("یادداشت پاک شود؟")
+                                    .setNegativeButton("انصراف", null)
+                                    .setPositiveButton("پاک‌کردن", (d, w) -> {
+                                        prefs.edit().remove(noteKey(date)).apply();
+                                        showNotes();
+                                    }).show();
+                        }).show();
+                return true;
+            });
             LinearLayout.LayoutParams cardParams = new LinearLayout.LayoutParams(-1, -2);
-            cardParams.bottomMargin = dp(7);
+            cardParams.bottomMargin = dp(12);
             list.addView(noteCard, cardParams);
         }
         showScreen("Notes", scroll(list));
@@ -1172,21 +1625,22 @@ public class MainActivity extends AppCompatActivity {
     private void showNoteEditor(String date) {
         LinearLayout editorScreen = column();
         editorScreen.setPadding(dp(4), dp(8), dp(4), dp(12));
-        TextView dateLabel = text(prettyDate(date), 13, Color.rgb(166, 161, 255));
+        TextView dateLabel = text(prettyDate(date), 13, Color.rgb(60, 180, 230));
         editorScreen.addView(dateLabel);
         TextInputEditText editor = new TextInputEditText(this);
         editor.setTextColor(Color.WHITE);
         editor.setHintTextColor(Color.GRAY);
-        editor.setHint("Write a plan, capture an idea, or list your tasks…");
+        editor.setHint("برنامه، ایده یا یادداشت روزتان را بنویسید…");
+        if (appTypeface != null) editor.setTypeface(appTypeface);
         editor.setMinLines(8);
         editor.setGravity(Gravity.TOP);
         editor.setPadding(dp(14), dp(14), dp(14), dp(14));
-        editor.setBackgroundTintList(android.content.res.ColorStateList.valueOf(Color.rgb(108, 99, 255)));
+        editor.setBackgroundTintList(android.content.res.ColorStateList.valueOf(Color.rgb(34, 158, 217)));
         editor.setText(prefs.getString(noteKey(date), ""));
         LinearLayout.LayoutParams editorParams = new LinearLayout.LayoutParams(-1, 0, 1);
         editorParams.topMargin = dp(8);
         editorScreen.addView(editor, editorParams);
-        TextView savedStatus = text("Saved automatically", 12, Color.LTGRAY);
+        TextView savedStatus = text("تغییرات به‌صورت خودکار ذخیره می‌شوند", 12, Color.LTGRAY);
         LinearLayout.LayoutParams statusParams = new LinearLayout.LayoutParams(-1, -2);
         statusParams.topMargin = dp(8);
         editorScreen.addView(savedStatus, statusParams);
@@ -1205,16 +1659,701 @@ public class MainActivity extends AppCompatActivity {
     private String prettyDate(String value) {
         try {
             Date date = new SimpleDateFormat("yyyy-MM-dd", Locale.US).parse(value);
-            return DateFormat.getDateInstance(DateFormat.FULL).format(date);
-        } catch (Exception ignored) {
+            if (date == null) return value;
+            Calendar calendar = Calendar.getInstance();
+            calendar.setTime(date);
+            int[] jalali = gregorianToJalali(calendar.get(Calendar.YEAR),
+                    calendar.get(Calendar.MONTH) + 1, calendar.get(Calendar.DAY_OF_MONTH));
+            String[] months = {"فروردین", "اردیبهشت", "خرداد", "تیر", "مرداد", "شهریور",
+                    "مهر", "آبان", "آذر", "دی", "بهمن", "اسفند"};
+            String jalaliText = calendar.getDisplayName(Calendar.DAY_OF_WEEK, Calendar.LONG,
+                    new Locale("fa", "IR")) + "، " + persianDigits(jalali[2]) + " "
+                    + months[jalali[1] - 1] + " " + persianDigits(jalali[0]);
+            String gregorianText = new SimpleDateFormat("EEEE, d MMMM yyyy", Locale.US).format(date);
+            return jalaliText + "\n" + gregorianText;
+        } catch (java.text.ParseException ignored) {
             return value;
         }
+    }
+
+    private String todayDateLabel() {
+        return prettyDate(todayKey());
+    }
+
+    private void showDatePickerForNotes() {
+        Calendar today = Calendar.getInstance();
+        new DatePickerDialog(this, (picker, year, month, day) -> {
+            Calendar selected = Calendar.getInstance();
+            selected.clear();
+            selected.set(year, month, day);
+            showNoteEditor(new SimpleDateFormat("yyyy-MM-dd", Locale.US)
+                    .format(selected.getTime()));
+        }, today.get(Calendar.YEAR), today.get(Calendar.MONTH),
+                today.get(Calendar.DAY_OF_MONTH)).show();
+    }
+
+    private String formatDateTime(long timeMillis) {
+        Calendar calendar = Calendar.getInstance();
+        calendar.setTimeInMillis(timeMillis);
+        String date = prettyDate(new SimpleDateFormat("yyyy-MM-dd", Locale.US).format(calendar.getTime()));
+        return date + " · " + persianDigits(new SimpleDateFormat("HH:mm", Locale.US).format(calendar.getTime()));
+    }
+
+    private String persianDigits(Object value) {
+        return String.valueOf(value).replace('0', '۰').replace('1', '۱').replace('2', '۲')
+                .replace('3', '۳').replace('4', '۴').replace('5', '۵')
+                .replace('6', '۶').replace('7', '۷').replace('8', '۸').replace('9', '۹');
+    }
+
+    private int[] gregorianToJalali(int year, int month, int day) {
+        int[] gregorianMonthDays = {31, 28, 31, 30, 31, 30, 31, 31, 30, 31, 30, 31};
+        int[] jalaliMonthDays = {31, 31, 31, 31, 31, 31, 30, 30, 30, 30, 30, 29};
+        int gy = year - 1600;
+        int gm = month - 1;
+        int gd = day - 1;
+        int dayNumber = 365 * gy + (gy + 3) / 4 - (gy + 99) / 100 + (gy + 399) / 400;
+        for (int i = 0; i < gm; i++) dayNumber += gregorianMonthDays[i];
+        if (gm > 1 && (year % 4 == 0 && (year % 100 != 0 || year % 400 == 0))) dayNumber++;
+        dayNumber += gd;
+        int jalaliDayNumber = dayNumber - 79;
+        int jalaliYear = 979 + 33 * (jalaliDayNumber / 12053);
+        jalaliDayNumber %= 12053;
+        jalaliYear += 4 * (jalaliDayNumber / 1461);
+        jalaliDayNumber %= 1461;
+        if (jalaliDayNumber >= 366) {
+            jalaliYear += (jalaliDayNumber - 1) / 365;
+            jalaliDayNumber = (jalaliDayNumber - 1) % 365;
+        }
+        int jalaliMonth = 0;
+        while (jalaliMonth < 11 && jalaliDayNumber >= jalaliMonthDays[jalaliMonth]) {
+            jalaliDayNumber -= jalaliMonthDays[jalaliMonth++];
+        }
+        return new int[]{jalaliYear, jalaliMonth + 1, jalaliDayNumber + 1};
+    }
+
+    private String tasksKey(String date) {
+        return TASKS_PREFIX + date;
+    }
+
+    private List<PlannerTask> loadTasks(String date) {
+        List<PlannerTask> tasks = new ArrayList<>();
+        try {
+            JSONArray array = new JSONArray(prefs.getString(tasksKey(date), "[]"));
+            for (int i = 0; i < array.length(); i++) {
+                JSONObject item = array.getJSONObject(i);
+                PlannerTask task = new PlannerTask(item.optString("id", UUID.randomUUID().toString()),
+                        item.optString("title"), item.optString("details"), item.optLong("dueAt"),
+                        item.optLong("remindAt"), item.optBoolean("done", false));
+                task.noteDate = date;
+                tasks.add(task);
+            }
+        } catch (JSONException e) {
+            android.util.Log.e("FocusTasks", "Unable to read tasks for " + date, e);
+        }
+        Collections.sort(tasks, (first, second) -> Long.compare(first.dueAt, second.dueAt));
+        return tasks;
+    }
+
+    private List<PlannerTask> loadAllTasks() {
+        List<PlannerTask> tasks = new ArrayList<>();
+        for (Map.Entry<String, ?> entry : prefs.getAll().entrySet()) {
+            if (!entry.getKey().startsWith(TASKS_PREFIX) || !(entry.getValue() instanceof String)) continue;
+            String date = entry.getKey().substring(TASKS_PREFIX.length());
+            for (PlannerTask task : loadTasks(date)) {
+                task.noteDate = date;
+                tasks.add(task);
+            }
+        }
+        Collections.sort(tasks, (first, second) -> Long.compare(first.dueAt, second.dueAt));
+        return tasks;
+    }
+
+    private void saveTasks(String date, List<PlannerTask> tasks) {
+        JSONArray array = new JSONArray();
+        try {
+            for (PlannerTask task : tasks) {
+                JSONObject item = new JSONObject();
+                item.put("id", task.id);
+                item.put("title", task.title);
+                item.put("details", task.details);
+                item.put("dueAt", task.dueAt);
+                item.put("remindAt", task.remindAt);
+                item.put("done", task.done);
+                array.put(item);
+            }
+        } catch (JSONException e) {
+            android.util.Log.e("FocusTasks", "Unable to save tasks for " + date, e);
+            Toast.makeText(this, "ذخیرهٔ کارها انجام نشد.", Toast.LENGTH_LONG).show();
+            return;
+        }
+        prefs.edit().putString(tasksKey(date), array.toString()).apply();
+    }
+
+    private void scheduleTaskReminders(PlannerTask task) {
+        ReminderScheduler.cancel(this, task.id + ":deadline");
+        ReminderScheduler.cancel(this, task.id + ":reminder");
+        if (task.done) return;
+        ReminderScheduler.schedule(this, task.id + ":deadline", "مهلت کار تمام شد",
+                task.title, task.dueAt);
+        if (task.remindAt > 0 && task.remindAt < task.dueAt) {
+            ReminderScheduler.schedule(this, task.id + ":reminder", "یادآوری کار",
+                    task.title, task.remindAt);
+        }
+    }
+
+    private void showTaskEditor(String date, @Nullable PlannerTask existing) {
+        LinearLayout form = column();
+        form.setPadding(dp(4), dp(8), dp(4), 0);
+        TextInputEditText title = new TextInputEditText(this);
+        title.setSingleLine(true);
+        title.setHint("عنوان کار");
+        title.setTextColor(Color.WHITE);
+        title.setHintTextColor(Color.GRAY);
+        if (appTypeface != null) title.setTypeface(appTypeface);
+        if (existing != null) title.setText(existing.title);
+        form.addView(title, new LinearLayout.LayoutParams(-1, dp(56)));
+        TextInputEditText details = new TextInputEditText(this);
+        details.setHint("توضیحات (اختیاری)");
+        details.setTextColor(Color.WHITE);
+        details.setHintTextColor(Color.GRAY);
+        details.setMinLines(2);
+        if (appTypeface != null) details.setTypeface(appTypeface);
+        if (existing != null) details.setText(existing.details);
+        form.addView(details, new LinearLayout.LayoutParams(-1, dp(76)));
+
+        Calendar due = Calendar.getInstance();
+        due.add(Calendar.HOUR_OF_DAY, 1);
+        if (existing != null && existing.dueAt > 0) due.setTimeInMillis(existing.dueAt);
+        TextView dueLabel = text("", 12, Color.LTGRAY);
+        MaterialButton dueButton = button("انتخاب زمان پایان");
+        dueButton.setOnClickListener(v -> pickDateTime(due, "مهلت انجام", dueLabel));
+        form.addView(dueButton);
+        form.addView(dueLabel);
+        dueLabel.setText(formatDateTime(due.getTimeInMillis()));
+
+        int[] reminderOffsets = {-1, 0, 5, 10, 30, 60};
+        String[] reminderOptions = {"بدون یادآوری", "در زمان پایان", "۵ دقیقه قبل",
+                "۱۰ دقیقه قبل", "۳۰ دقیقه قبل", "۱ ساعت قبل"};
+        int initialOffset = existing == null ? 10 : existing.remindAt <= 0 ? -1
+                : (int) Math.max(0, (existing.dueAt - existing.remindAt) / 60_000L);
+        int selectedIndex = 0;
+        for (int i = 0; i < reminderOffsets.length; i++) {
+            if (reminderOffsets[i] == initialOffset) selectedIndex = i;
+        }
+        final int[] selectedReminder = {selectedIndex};
+        MaterialButton reminderButton = button(reminderOptions[selectedIndex]);
+        reminderButton.setOnClickListener(v -> new MaterialAlertDialogBuilder(this)
+                .setTitle("زمان یادآوری")
+                .setSingleChoiceItems(reminderOptions, selectedReminder[0], (dialog, which) -> {
+                    selectedReminder[0] = which;
+                    reminderButton.setText(reminderOptions[which]);
+                    dialog.dismiss();
+                }).show());
+        form.addView(reminderButton);
+
+        androidx.appcompat.app.AlertDialog dialog = new MaterialAlertDialogBuilder(this)
+                .setTitle(existing == null ? "کار جدید" : "ویرایش کار")
+                .setView(form)
+                .setNegativeButton("انصراف", null)
+                .setPositiveButton("ذخیره", null)
+                .create();
+        dialog.setOnShowListener(ignored -> dialog.getButton(androidx.appcompat.app.AlertDialog.BUTTON_POSITIVE)
+                .setOnClickListener(v -> {
+                    String taskTitle = String.valueOf(title.getText()).trim();
+                    if (taskTitle.isEmpty()) {
+                        title.setError("عنوان کار را وارد کنید.");
+                        return;
+                    }
+                    long dueAt = due.getTimeInMillis();
+                    int offset = reminderOffsets[selectedReminder[0]];
+                    long remindAt = offset < 0 ? 0 : dueAt - offset * 60_000L;
+                    PlannerTask task = existing == null
+                            ? new PlannerTask(UUID.randomUUID().toString(), taskTitle,
+                            String.valueOf(details.getText()).trim(), dueAt, remindAt, false)
+                            : existing.withValues(taskTitle, String.valueOf(details.getText()).trim(),
+                            dueAt, remindAt);
+                    List<PlannerTask> tasks = loadTasks(date);
+                    if (existing == null) tasks.add(task);
+                    else {
+                        for (int i = 0; i < tasks.size(); i++) {
+                            if (tasks.get(i).id.equals(existing.id)) {
+                                tasks.set(i, task);
+                                break;
+                            }
+                        }
+                    }
+                    saveTasks(date, tasks);
+                    requestNotificationPermission();
+                    scheduleTaskReminders(task);
+                    dialog.dismiss();
+                    if ("Reminders".equals(activeScreen)) showReminders();
+                    else if (isHome) buildHome();
+                    else showNotes();
+                }));
+        dialog.show();
+    }
+
+    private void pickDateTime(Calendar calendar, String title, TextView preview) {
+        new DatePickerDialog(this, (picker, year, month, day) -> {
+            calendar.set(Calendar.YEAR, year);
+            calendar.set(Calendar.MONTH, month);
+            calendar.set(Calendar.DAY_OF_MONTH, day);
+            new TimePickerDialog(this, (timePicker, hour, minute) -> {
+                calendar.set(Calendar.HOUR_OF_DAY, hour);
+                calendar.set(Calendar.MINUTE, minute);
+                calendar.set(Calendar.SECOND, 0);
+                calendar.set(Calendar.MILLISECOND, 0);
+                preview.setText(title + ": " + formatDateTime(calendar.getTimeInMillis()));
+            }, calendar.get(Calendar.HOUR_OF_DAY), calendar.get(Calendar.MINUTE), true).show();
+        }, calendar.get(Calendar.YEAR), calendar.get(Calendar.MONTH),
+                calendar.get(Calendar.DAY_OF_MONTH)).show();
+    }
+
+    private void addTaskRows(LinearLayout parent, List<PlannerTask> tasks,
+                             String noteDate, boolean compact) {
+        if (tasks.isEmpty()) {
+            parent.addView(text("هنوز کاری برای این یادداشت ثبت نشده است.", 12, Color.GRAY));
+            return;
+        }
+        for (PlannerTask task : tasks) {
+            String taskDate = task.noteDate == null ? noteDate : task.noteDate;
+            LinearLayout item = row();
+            CheckBox checkBox = new CheckBox(this);
+            checkBox.setButtonTintList(android.content.res.ColorStateList.valueOf(Color.rgb(60, 180, 230)));
+            checkBox.setChecked(task.done);
+            item.addView(checkBox, new LinearLayout.LayoutParams(dp(42), dp(48)));
+            LinearLayout details = column();
+            TextView taskName = text(task.title, 13, task.done ? Color.GRAY : Color.WHITE);
+            if (task.done) taskName.setPaintFlags(taskName.getPaintFlags() | android.graphics.Paint.STRIKE_THRU_TEXT_FLAG);
+            details.addView(taskName);
+            if (!task.details.isEmpty()) {
+                TextView description = text(task.details, 11, Color.LTGRAY);
+                details.addView(description);
+            }
+            String dueText = task.dueAt <= System.currentTimeMillis() && !task.done
+                    ? "عقب‌افتاده · " + formatDateTime(task.dueAt)
+                    : "مهلت · " + formatDateTime(task.dueAt);
+            details.addView(text(dueText, 11, task.dueAt < System.currentTimeMillis()
+                    && !task.done ? Color.rgb(255, 130, 110) : Color.LTGRAY));
+            item.addView(details, new LinearLayout.LayoutParams(0, -2, 1));
+            checkBox.setOnCheckedChangeListener((button, checked) -> {
+                task.done = checked;
+                List<PlannerTask> current = loadTasks(taskDate);
+                for (PlannerTask itemTask : current) {
+                    if (itemTask.id.equals(task.id)) itemTask.done = checked;
+                }
+                saveTasks(taskDate, current);
+                scheduleTaskReminders(task);
+                if ("Reminders".equals(activeScreen)) showReminders();
+                else if (isHome) buildHome();
+                else showNotes();
+            });
+            item.setOnClickListener(v -> showTaskEditor(taskDate, task));
+            item.setOnLongClickListener(v -> {
+                new MaterialAlertDialogBuilder(this).setTitle(task.title)
+                        .setMessage("این کار و یادآورهای آن پاک شوند؟")
+                        .setNegativeButton("انصراف", null)
+                        .setPositiveButton("پاک‌کردن", (dialog, which) -> {
+                            List<PlannerTask> current = loadTasks(taskDate);
+                            for (int i = current.size() - 1; i >= 0; i--) {
+                                if (current.get(i).id.equals(task.id)) {
+                                    current.remove(i);
+                                    break;
+                                }
+                            }
+                            saveTasks(taskDate, current);
+                            ReminderScheduler.cancel(this, task.id + ":deadline");
+                            ReminderScheduler.cancel(this, task.id + ":reminder");
+                            if ("Reminders".equals(activeScreen)) showReminders();
+                            else if (isHome) buildHome();
+                            else showNotes();
+                        }).show();
+                return true;
+            });
+            LinearLayout.LayoutParams itemParams = new LinearLayout.LayoutParams(-1, -2);
+            itemParams.topMargin = compact ? dp(2) : dp(4);
+            parent.addView(item, itemParams);
+        }
+    }
+
+    private void addUpcomingTasks(LinearLayout parent) {
+        List<PlannerTask> tasks = new ArrayList<>();
+        for (PlannerTask task : loadAllTasks()) if (!task.done) tasks.add(task);
+        if (tasks.isEmpty()) return;
+        TextView heading = text("کارهای پیشِ‌رو", 15, Color.WHITE);
+        heading.setTypeface(appTypeface, Typeface.BOLD);
+        LinearLayout.LayoutParams headingParams = new LinearLayout.LayoutParams(-1, -2);
+        headingParams.bottomMargin = dp(6);
+        parent.addView(heading, headingParams);
+        MaterialCardView taskCard = card();
+        LinearLayout taskList = column();
+        taskList.setPadding(dp(10), dp(6), dp(10), dp(6));
+        List<PlannerTask> nextTasks = tasks.subList(0, Math.min(3, tasks.size()));
+        for (PlannerTask task : nextTasks) {
+            String date = task.noteDate == null ? todayKey() : task.noteDate;
+            addTaskRows(taskList, Collections.singletonList(task), date, true);
+        }
+        taskCard.addView(taskList);
+        taskCard.setOnClickListener(v -> showReminders());
+        LinearLayout.LayoutParams cardParams = new LinearLayout.LayoutParams(-1, -2);
+        cardParams.bottomMargin = dp(14);
+        parent.addView(taskCard, cardParams);
+    }
+
+    private void restoreExamTimer() {
+        examTitle = prefs.getString("exam_title", "آزمون");
+        examDurationMillis = Math.max(60_000L, prefs.getLong("exam_duration", 90 * 60_000L));
+        long endAtWall = prefs.getLong("exam_end_wall", 0);
+        if (endAtWall > System.currentTimeMillis()) {
+            examRemainingMillis = endAtWall - System.currentTimeMillis();
+            examEndAtElapsed = SystemClock.elapsedRealtime() + examRemainingMillis;
+            examRunning = true;
+        } else if (endAtWall > 0) {
+            examRemainingMillis = 0;
+            prefs.edit().remove("exam_end_wall").putLong("exam_remaining", 0).apply();
+            ReminderScheduler.cancel(this, EXAM_REMINDER_ID);
+            ReminderReceiver.showNotification(this, "زمان آزمون تمام شد", examTitle);
+        } else {
+            examRemainingMillis = Math.max(0, prefs.getLong("exam_remaining", examDurationMillis));
+        }
+    }
+
+    private void addExamTimerCard(LinearLayout parent) {
+        MaterialCardView card = card();
+        LinearLayout content = row();
+        content.setPadding(dp(14), dp(12), dp(14), dp(12));
+        LinearLayout details = column();
+        TextView heading = text("تایمر آزمون", 14, Color.WHITE);
+        heading.setTypeface(appTypeface, Typeface.BOLD);
+        details.addView(heading);
+        examHomeSummary = text(examTitle + " · " + formatDuration(examRemainingMillis),
+                12, Color.LTGRAY);
+        LinearLayout.LayoutParams summaryParams = new LinearLayout.LayoutParams(-1, -2);
+        summaryParams.topMargin = dp(3);
+        details.addView(examHomeSummary, summaryParams);
+        content.addView(details, new LinearLayout.LayoutParams(0, -2, 1));
+        MaterialButton open = button(examRunning ? "مدیریت" : "تنظیم");
+        open.setMinHeight(dp(42));
+        open.setOnClickListener(v -> showExamTimer());
+        content.addView(open);
+        card.addView(content);
+        card.setOnClickListener(v -> showExamTimer());
+        LinearLayout.LayoutParams params = new LinearLayout.LayoutParams(-1, -2);
+        params.bottomMargin = dp(14);
+        parent.addView(card, params);
+    }
+
+    private String formatDuration(long millis) {
+        long totalSeconds = Math.max(0, (millis + 999) / 1000);
+        return persianDigits(String.format(Locale.US, "%02d:%02d:%02d",
+                totalSeconds / 3600, totalSeconds / 60 % 60, totalSeconds % 60));
+    }
+
+    private void showExamTimer() {
+        LinearLayout content = column();
+        content.setPadding(0, dp(12), 0, dp(12));
+        TextView description = text("مدت آزمون را تنظیم کنید؛ با پایان زمان، اعلان دریافت می‌کنید.",
+                13, Color.LTGRAY);
+        content.addView(description);
+        TextInputEditText title = new TextInputEditText(this);
+        title.setSingleLine(true);
+        title.setTextColor(Color.WHITE);
+        title.setHintTextColor(Color.GRAY);
+        title.setHint("نام آزمون");
+        title.setText(examTitle);
+        if (appTypeface != null) title.setTypeface(appTypeface);
+        LinearLayout.LayoutParams titleParams = new LinearLayout.LayoutParams(-1, dp(54));
+        titleParams.topMargin = dp(12);
+        content.addView(title, titleParams);
+        TextInputEditText duration = new TextInputEditText(this);
+        duration.setSingleLine(true);
+        duration.setInputType(android.text.InputType.TYPE_CLASS_NUMBER);
+        duration.setTextColor(Color.WHITE);
+        duration.setHintTextColor(Color.GRAY);
+        duration.setHint("مدت آزمون به دقیقه");
+        duration.setText(String.valueOf(examDurationMillis / 60_000L));
+        if (appTypeface != null) duration.setTypeface(appTypeface);
+        LinearLayout.LayoutParams durationParams = new LinearLayout.LayoutParams(-1, dp(54));
+        durationParams.topMargin = dp(8);
+        content.addView(duration, durationParams);
+        FrameLayout clock = new FrameLayout(this);
+        examProgress = new TimerProgressView();
+        clock.addView(examProgress, new FrameLayout.LayoutParams(dp(220), dp(220), Gravity.CENTER));
+        examTimeText = text(formatDuration(examRemainingMillis), 32, Color.WHITE);
+        examTimeText.setGravity(Gravity.CENTER);
+        clock.addView(examTimeText, new FrameLayout.LayoutParams(-1, -1));
+        LinearLayout.LayoutParams clockParams = new LinearLayout.LayoutParams(-1, dp(230));
+        clockParams.topMargin = dp(12);
+        content.addView(clock, clockParams);
+        LinearLayout controls = row();
+        controls.setGravity(Gravity.CENTER);
+        examStartButton = button(examRunning ? "توقف موقت" : "شروع آزمون");
+        examStartButton.setOnClickListener(v -> {
+            if (!examRunning) {
+                String examName = String.valueOf(title.getText()).trim();
+                if (!examName.isEmpty()) examTitle = examName;
+                try {
+                    long minutes = Long.parseLong(String.valueOf(duration.getText()).trim());
+                    if (minutes < 1 || minutes > 720) throw new NumberFormatException();
+                    if (!examRunning && examRemainingMillis == examDurationMillis) {
+                        examDurationMillis = minutes * 60_000L;
+                        examRemainingMillis = examDurationMillis;
+                    } else if (!examRunning && examRemainingMillis <= 0) {
+                        examDurationMillis = minutes * 60_000L;
+                        examRemainingMillis = examDurationMillis;
+                    }
+                } catch (NumberFormatException e) {
+                    duration.setError("مدت آزمون باید بین ۱ تا ۷۲۰ دقیقه باشد.");
+                    return;
+                }
+                prefs.edit().putString("exam_title", examTitle)
+                        .putLong("exam_duration", examDurationMillis).apply();
+            }
+            toggleExamTimer();
+        });
+        controls.addView(examStartButton);
+        MaterialButton reset = button("شروع دوباره");
+        LinearLayout.LayoutParams resetParams = new LinearLayout.LayoutParams(-2, dp(48));
+        resetParams.leftMargin = dp(8);
+        reset.setLayoutParams(resetParams);
+        reset.setOnClickListener(v -> {
+            if (!examRunning) {
+                try {
+                    long minutes = Long.parseLong(String.valueOf(duration.getText()).trim());
+                    if (minutes < 1 || minutes > 720) throw new NumberFormatException();
+                    examDurationMillis = minutes * 60_000L;
+                    String examName = String.valueOf(title.getText()).trim();
+                    if (!examName.isEmpty()) examTitle = examName;
+                    prefs.edit().putString("exam_title", examTitle)
+                            .putLong("exam_duration", examDurationMillis).apply();
+                } catch (NumberFormatException e) {
+                    duration.setError("مدت آزمون باید بین ۱ تا ۷۲۰ دقیقه باشد.");
+                    return;
+                }
+            }
+            resetExamTimer();
+        });
+        controls.addView(reset);
+        LinearLayout.LayoutParams controlsParams = new LinearLayout.LayoutParams(-1, -2);
+        controlsParams.topMargin = dp(12);
+        content.addView(controls, controlsParams);
+        updateExamDisplay();
+        showScreen("Exam timer", scroll(content));
+    }
+
+    private void toggleExamTimer() {
+        if (examRunning) {
+            examRemainingMillis = Math.max(0, examEndAtElapsed - SystemClock.elapsedRealtime());
+            examRunning = false;
+            handler.removeCallbacks(examTick);
+            prefs.edit().remove("exam_end_wall").putLong("exam_remaining", examRemainingMillis).apply();
+            ReminderScheduler.cancel(this, EXAM_REMINDER_ID);
+        } else {
+            requestNotificationPermission();
+            if (examRemainingMillis <= 0) examRemainingMillis = examDurationMillis;
+            examEndAtElapsed = SystemClock.elapsedRealtime() + examRemainingMillis;
+            examRunning = true;
+            long endAtWall = System.currentTimeMillis() + examRemainingMillis;
+            prefs.edit().putLong("exam_end_wall", endAtWall)
+                    .putLong("exam_remaining", examRemainingMillis).apply();
+            ReminderScheduler.schedule(this, EXAM_REMINDER_ID, "زمان آزمون تمام شد",
+                    examTitle, endAtWall);
+            handler.removeCallbacks(examTick);
+            handler.post(examTick);
+        }
+        updateExamDisplay();
+    }
+
+    private void resetExamTimer() {
+        examRunning = false;
+        handler.removeCallbacks(examTick);
+        ReminderScheduler.cancel(this, EXAM_REMINDER_ID);
+        examRemainingMillis = examDurationMillis;
+        examEndAtElapsed = 0;
+        prefs.edit().remove("exam_end_wall").putLong("exam_remaining", examRemainingMillis).apply();
+        updateExamDisplay();
+    }
+
+    private void finishExamTimer() {
+        examRunning = false;
+        handler.removeCallbacks(examTick);
+        examRemainingMillis = 0;
+        examEndAtElapsed = 0;
+        prefs.edit().remove("exam_end_wall").putLong("exam_remaining", 0).apply();
+        ReminderScheduler.cancel(this, EXAM_REMINDER_ID);
+        ReminderReceiver.showNotification(this, "زمان آزمون تمام شد", examTitle);
+        updateExamDisplay();
+    }
+
+    private void updateExamDisplay() {
+        String remaining = formatDuration(examRemainingMillis);
+        if (examTimeText != null) examTimeText.setText(remaining);
+        if (examProgress != null) examProgress.setProgress(examRemainingMillis, examDurationMillis);
+        if (examStartButton != null) examStartButton.setText(examRunning ? "توقف موقت" : "شروع آزمون");
+        if (examHomeSummary != null) {
+            examHomeSummary.setText(examTitle + " · " + remaining);
+        }
+    }
+
+    private void showReminders() {
+        LinearLayout content = column();
+        content.setPadding(0, dp(8), 0, dp(12));
+        LinearLayout actions = row();
+        MaterialButton addReminder = button("یادآوری جدید");
+        addReminder.setOnClickListener(v -> showReminderEditor());
+        actions.addView(addReminder, new LinearLayout.LayoutParams(0, dp(48), 1));
+        MaterialButton addTask = button("کار جدید");
+        LinearLayout.LayoutParams addTaskParams = new LinearLayout.LayoutParams(0, dp(48), 1);
+        addTaskParams.leftMargin = dp(8);
+        addTask.setOnClickListener(v -> showTaskEditor(todayKey(), null));
+        actions.addView(addTask, addTaskParams);
+        content.addView(actions);
+
+        TextView taskHeading = text("کارها و مهلت‌ها", 16, Color.WHITE);
+        taskHeading.setTypeface(appTypeface, Typeface.BOLD);
+        LinearLayout.LayoutParams headingParams = new LinearLayout.LayoutParams(-1, -2);
+        headingParams.topMargin = dp(16);
+        headingParams.bottomMargin = dp(6);
+        content.addView(taskHeading, headingParams);
+        List<PlannerTask> tasks = loadAllTasks();
+        for (int i = tasks.size() - 1; i >= 0; i--) {
+            if (tasks.get(i).done) tasks.remove(i);
+        }
+        addTaskRows(content, tasks, null, false);
+
+        TextView reminderHeading = text("یادآورهای زمان‌بندی‌شده", 16, Color.WHITE);
+        reminderHeading.setTypeface(appTypeface, Typeface.BOLD);
+        LinearLayout.LayoutParams reminderHeadingParams = new LinearLayout.LayoutParams(-1, -2);
+        reminderHeadingParams.topMargin = dp(20);
+        reminderHeadingParams.bottomMargin = dp(6);
+        content.addView(reminderHeading, reminderHeadingParams);
+        JSONArray reminders = loadReminders();
+        if (reminders.length() == 0) {
+            content.addView(text("یادآور مستقلی ثبت نشده است.", 12, Color.GRAY));
+        }
+        for (int i = 0; i < reminders.length(); i++) {
+            JSONObject reminder = reminders.optJSONObject(i);
+            if (reminder == null) continue;
+            String id = reminder.optString("id");
+            MaterialCardView card = card();
+            LinearLayout row = row();
+            row.setPadding(dp(12), dp(10), dp(8), dp(10));
+            LinearLayout details = column();
+            details.addView(text(reminder.optString("title"), 14, Color.WHITE));
+            String description = reminder.optString("details");
+            if (!description.isEmpty()) details.addView(text(description, 12, Color.LTGRAY));
+            details.addView(text(formatDateTime(reminder.optLong("at")), 11, Color.rgb(60, 180, 230)));
+            row.addView(details, new LinearLayout.LayoutParams(0, -2, 1));
+            MaterialButton remove = iconButton(R.drawable.ic_close, "حذف یادآور", () -> {
+                JSONArray current = loadReminders();
+                for (int index = current.length() - 1; index >= 0; index--) {
+                    JSONObject saved = current.optJSONObject(index);
+                    if (saved != null && id.equals(saved.optString("id"))) current.remove(index);
+                }
+                prefs.edit().putString(SAVED_REMINDERS, current.toString()).apply();
+                ReminderScheduler.cancel(this, id);
+                showReminders();
+            });
+            row.addView(remove);
+            card.addView(row);
+            LinearLayout.LayoutParams cardParams = new LinearLayout.LayoutParams(-1, -2);
+            cardParams.topMargin = dp(5);
+            content.addView(card, cardParams);
+        }
+        showScreen("Reminders", scroll(content));
+        requestNotificationPermission();
+    }
+
+    private JSONArray loadReminders() {
+        try {
+            return new JSONArray(prefs.getString(SAVED_REMINDERS, "[]"));
+        } catch (JSONException e) {
+            android.util.Log.e("FocusReminders", "Unable to read saved reminders.", e);
+            return new JSONArray();
+        }
+    }
+
+    private void showReminderEditor() {
+        LinearLayout form = column();
+        form.setPadding(dp(4), dp(8), dp(4), 0);
+        TextInputEditText title = new TextInputEditText(this);
+        title.setSingleLine(true);
+        title.setHint("عنوان یادآوری");
+        title.setTextColor(Color.WHITE);
+        title.setHintTextColor(Color.GRAY);
+        if (appTypeface != null) title.setTypeface(appTypeface);
+        form.addView(title, new LinearLayout.LayoutParams(-1, dp(56)));
+        TextInputEditText details = new TextInputEditText(this);
+        details.setHint("توضیحات");
+        details.setTextColor(Color.WHITE);
+        details.setHintTextColor(Color.GRAY);
+        details.setMinLines(2);
+        if (appTypeface != null) details.setTypeface(appTypeface);
+        form.addView(details, new LinearLayout.LayoutParams(-1, dp(76)));
+        Calendar when = Calendar.getInstance();
+        when.add(Calendar.HOUR_OF_DAY, 1);
+        TextView whenLabel = text(formatDateTime(when.getTimeInMillis()), 12, Color.LTGRAY);
+        MaterialButton chooseTime = button("انتخاب تاریخ و ساعت");
+        chooseTime.setOnClickListener(v -> pickDateTime(when, "زمان یادآوری", whenLabel));
+        form.addView(chooseTime);
+        form.addView(whenLabel);
+        androidx.appcompat.app.AlertDialog dialog = new MaterialAlertDialogBuilder(this)
+                .setTitle("یادآوری جدید")
+                .setView(form)
+                .setNegativeButton("انصراف", null)
+                .setPositiveButton("ذخیره", null)
+                .create();
+        dialog.setOnShowListener(ignored -> dialog.getButton(androidx.appcompat.app.AlertDialog.BUTTON_POSITIVE)
+                .setOnClickListener(v -> {
+                    String reminderTitle = String.valueOf(title.getText()).trim();
+                    if (reminderTitle.isEmpty()) {
+                        title.setError("عنوان یادآوری را وارد کنید.");
+                        return;
+                    }
+                    String id = UUID.randomUUID().toString();
+                    long at = when.getTimeInMillis();
+                    try {
+                        JSONObject item = new JSONObject();
+                        item.put("id", id);
+                        item.put("title", reminderTitle);
+                        item.put("details", String.valueOf(details.getText()).trim());
+                        item.put("at", at);
+                        JSONArray saved = loadReminders();
+                        saved.put(item);
+                        prefs.edit().putString(SAVED_REMINDERS, saved.toString()).apply();
+                    } catch (JSONException e) {
+                        android.util.Log.e("FocusReminders", "Unable to save reminder.", e);
+                        Toast.makeText(this, "ذخیرهٔ یادآوری انجام نشد.", Toast.LENGTH_LONG).show();
+                        return;
+                    }
+                    ReminderScheduler.schedule(this, id, reminderTitle,
+                            String.valueOf(details.getText()).trim(), at);
+                    dialog.dismiss();
+                    showReminders();
+                }));
+        dialog.show();
+    }
+
+    private void createReminderChannel() {
+        if (Build.VERSION.SDK_INT >= Build.VERSION_CODES.O) {
+            NotificationManager manager = (NotificationManager) getSystemService(NOTIFICATION_SERVICE);
+            if (manager != null) manager.createNotificationChannel(new android.app.NotificationChannel(
+                    "focus_reminders", "یادآورها و کارها", NotificationManager.IMPORTANCE_HIGH));
+        }
+    }
+
+    private void requestNotificationPermission() {
+        if (Build.VERSION.SDK_INT < 33
+                || ContextCompat.checkSelfPermission(this, Manifest.permission.POST_NOTIFICATIONS)
+                == PackageManager.PERMISSION_GRANTED) return;
+        ActivityCompat.requestPermissions(this,
+                new String[]{Manifest.permission.POST_NOTIFICATIONS}, 15);
     }
 
     private void showMusic() {
         LinearLayout list = column();
         list.setPadding(0, dp(4), 0, dp(12));
-        if (tracks.isEmpty() && !tracksLoaded) loadTracks();
+        if (tracks.isEmpty() && !tracksLoaded && !loadingSavedTracks) loadTracks();
         MaterialCardView noise = card();
         LinearLayout noiseRow = row();
         noiseRow.setPadding(dp(12), dp(9), dp(12), dp(9));
@@ -1278,7 +2417,7 @@ public class MainActivity extends AppCompatActivity {
         musicSearch.setSingleLine(true);
         musicSearch.setTextColor(Color.WHITE);
         musicSearch.setHintTextColor(Color.GRAY);
-        musicSearch.setHint("Search tracks, artists, albums");
+        musicSearch.setHint(fa("Search tracks, artists, albums"));
         android.graphics.drawable.Drawable searchIcon = ContextCompat.getDrawable(this, R.drawable.ic_search);
         if (searchIcon != null) {
             searchIcon = searchIcon.mutate();
@@ -1322,11 +2461,12 @@ public class MainActivity extends AppCompatActivity {
         musicSearch.addTextChangedListener(new android.text.TextWatcher() {
             @Override public void beforeTextChanged(CharSequence s, int start, int count, int after) { }
             @Override public void onTextChanged(CharSequence s, int start, int before, int count) {
+                visibleTrackCount = LIBRARY_PAGE_SIZE;
                 renderTrackRows(rows, s.toString());
             }
             @Override public void afterTextChanged(android.text.Editable s) { }
         });
-        if (loadingTracks) {
+        if (loadingTracks || loadingSavedTracks) {
             TextView loading = text("Loading your music library…", 12, Color.LTGRAY);
             LinearLayout.LayoutParams loadingParams = new LinearLayout.LayoutParams(-1, -2);
             loadingParams.topMargin = dp(8);
@@ -1349,12 +2489,15 @@ public class MainActivity extends AppCompatActivity {
         target.removeAllViews();
         String needle = query.trim().toLowerCase(Locale.getDefault());
         int matches = 0;
+        int rendered = 0;
         for (int i = 0; i < tracks.size(); i++) {
             final int index = i;
             Track track = tracks.get(i);
             String searchable = (track.title + " " + track.artist + " " + track.album).toLowerCase(Locale.getDefault());
             if (!searchable.contains(needle)) continue;
             matches++;
+            if (rendered >= visibleTrackCount) continue;
+            rendered++;
             MaterialCardView trackCard = card();
             LinearLayout trackRow = row();
             trackRow.setPadding(dp(9), dp(7), dp(5), dp(7));
@@ -1408,43 +2551,136 @@ public class MainActivity extends AppCompatActivity {
             });
         }
         if (matches == 0) target.addView(text("No matching tracks.", 12, Color.LTGRAY));
+        else if (matches > rendered) {
+            MaterialButton loadMore = button("Load more");
+            loadMore.setMinHeight(dp(44));
+            loadMore.setOnClickListener(v -> {
+                visibleTrackCount += LIBRARY_PAGE_SIZE;
+                renderTrackRows(target, query);
+            });
+            LinearLayout.LayoutParams moreParams = new LinearLayout.LayoutParams(-1, dp(44));
+            moreParams.topMargin = dp(8);
+            target.addView(loadMore, moreParams);
+        }
     }
 
     private Bitmap loadArtwork(Track track) {
         Uri artworkUri = track.artworkUri();
+        String cacheKey = track.uri.toString();
+        Bitmap cached = readBitmapCache("music-artwork", cacheKey);
+        if (cached != null) return cached;
+
+        Bitmap artwork = null;
         try {
             BitmapFactory.Options options = new BitmapFactory.Options();
             options.inJustDecodeBounds = true;
-            byte[] embedded = track.embeddedArtwork;
-            if (embedded == null && artworkUri == null) {
-                MediaMetadataRetriever retriever = new MediaMetadataRetriever();
-                try {
-                    retriever.setDataSource(this, track.uri);
-                    embedded = retriever.getEmbeddedPicture();
-                } catch (RuntimeException ignored) {
-                    return null;
-                } finally {
-                    retriever.release();
+            if (artworkUri != null) {
+                try (java.io.InputStream bounds = getContentResolver().openInputStream(artworkUri)) {
+                    if (bounds != null) BitmapFactory.decodeStream(bounds, null, options);
+                } catch (IOException | RuntimeException e) {
+                    android.util.Log.w("FocusArtwork", "Album art URI could not be read: " + artworkUri, e);
                 }
             }
-            if (embedded != null) {
-                BitmapFactory.decodeByteArray(embedded, 0, embedded.length, options);
+            if (options.outWidth > 0 && options.outHeight > 0) {
                 options.inSampleSize = sampleSize(options, dp(96));
                 options.inJustDecodeBounds = false;
-                return BitmapFactory.decodeByteArray(embedded, 0, embedded.length, options);
+                try (java.io.InputStream input = getContentResolver().openInputStream(artworkUri)) {
+                    if (input != null) artwork = BitmapFactory.decodeStream(input, null, options);
+                } catch (IOException | RuntimeException e) {
+                    android.util.Log.w("FocusArtwork", "Album art could not be decoded: " + artworkUri, e);
+                }
             }
-            if (artworkUri == null) return null;
-            try (java.io.InputStream bounds = getContentResolver().openInputStream(artworkUri)) {
-                if (bounds == null) return null;
-                BitmapFactory.decodeStream(bounds, null, options);
+            if (artwork == null) {
+                byte[] embedded = track.embeddedArtwork;
+                if (embedded == null) {
+                    MediaMetadataRetriever retriever = new MediaMetadataRetriever();
+                    try {
+                        retriever.setDataSource(this, track.uri);
+                        embedded = retriever.getEmbeddedPicture();
+                    } catch (RuntimeException e) {
+                        android.util.Log.w("FocusArtwork", "Embedded album art could not be read for "
+                                + track.uri, e);
+                    } finally {
+                        try {
+                            retriever.release();
+                        } catch (IOException e) {
+                            android.util.Log.w("FocusArtwork", "Metadata reader could not be released.", e);
+                        }
+                    }
+                }
+                if (embedded != null) {
+                    options = new BitmapFactory.Options();
+                    options.inJustDecodeBounds = true;
+                    BitmapFactory.decodeByteArray(embedded, 0, embedded.length, options);
+                    if (options.outWidth > 0 && options.outHeight > 0) {
+                        options.inSampleSize = sampleSize(options, dp(96));
+                        options.inJustDecodeBounds = false;
+                        artwork = BitmapFactory.decodeByteArray(embedded, 0, embedded.length, options);
+                    }
+                }
             }
-            options.inSampleSize = sampleSize(options, dp(96));
-            options.inJustDecodeBounds = false;
-            try (java.io.InputStream input = getContentResolver().openInputStream(artworkUri)) {
-                return input == null ? null : BitmapFactory.decodeStream(input, null, options);
-            }
-        } catch (Exception ignored) {
+            if (artwork != null) writeBitmapCache("music-artwork", cacheKey, artwork);
+            return artwork;
+        } catch (RuntimeException | OutOfMemoryError e) {
+            android.util.Log.w("FocusArtwork", "Album art could not be decoded for " + track.uri, e);
             return null;
+        }
+    }
+
+    private File bitmapCacheFile(String category, String key) {
+        try {
+            byte[] digest = MessageDigest.getInstance("SHA-256")
+                    .digest(key.getBytes(java.nio.charset.StandardCharsets.UTF_8));
+            StringBuilder name = new StringBuilder(digest.length * 2);
+            for (byte value : digest) name.append(String.format(Locale.ROOT, "%02x", value & 0xff));
+            File directory = new File(getCacheDir(), category);
+            if (!directory.isDirectory() && !directory.mkdirs()) {
+                android.util.Log.w("FocusCache", "Unable to create cache directory: " + directory);
+                return null;
+            }
+            return new File(directory, name + ".png");
+        } catch (NoSuchAlgorithmException e) {
+            android.util.Log.e("FocusCache", "SHA-256 is unavailable; cache entry was skipped.", e);
+            return null;
+        }
+    }
+
+    private Bitmap readBitmapCache(String category, String key) {
+        File file = bitmapCacheFile(category, key);
+        if (file == null || !file.isFile()) return null;
+        try {
+            Bitmap bitmap = BitmapFactory.decodeFile(file.getAbsolutePath());
+            if (bitmap == null && !file.delete()) {
+                android.util.Log.w("FocusCache", "Unable to remove invalid cache entry: " + file);
+            }
+            return bitmap;
+        } catch (RuntimeException | OutOfMemoryError e) {
+            android.util.Log.w("FocusCache", "Unable to load cached bitmap: " + file, e);
+            if (!file.delete()) android.util.Log.w("FocusCache", "Unable to remove invalid cache entry: " + file);
+            return null;
+        }
+    }
+
+    private void writeBitmapCache(String category, String key, Bitmap bitmap) {
+        File file = bitmapCacheFile(category, key);
+        if (file == null) return;
+        File temporary = new File(file.getParentFile(), file.getName() + ".tmp");
+        try (FileOutputStream output = new FileOutputStream(temporary)) {
+            if (!bitmap.compress(Bitmap.CompressFormat.PNG, 100, output)) {
+                android.util.Log.w("FocusCache", "Bitmap compression failed for " + file);
+                if (!temporary.delete()) android.util.Log.w("FocusCache", "Unable to remove temporary cache file.");
+                return;
+            }
+            output.flush();
+            if (!temporary.renameTo(file)) {
+                android.util.Log.w("FocusCache", "Unable to commit cached bitmap: " + file);
+                if (!temporary.delete()) android.util.Log.w("FocusCache", "Unable to remove temporary cache file.");
+            }
+        } catch (IOException e) {
+            android.util.Log.w("FocusCache", "Unable to write bitmap cache: " + file, e);
+            if (temporary.exists() && !temporary.delete()) {
+                android.util.Log.w("FocusCache", "Unable to remove temporary cache file: " + temporary);
+            }
         }
     }
 
@@ -1452,7 +2688,7 @@ public class MainActivity extends AppCompatActivity {
         String key = track.uri.toString();
         target.setTag(key);
         Bitmap cached = artworkCache.get(key);
-        if (cached != null) {
+        if (cached != null && !cached.isRecycled()) {
             target.setImageBitmap(cached);
             target.setBackground(null);
             return;
@@ -1579,20 +2815,35 @@ public class MainActivity extends AppCompatActivity {
     }
 
     private void loadSavedTracks() {
-        tracks.clear();
         String raw = prefs.getString(AUDIO_LIST, "[]");
-        try {
-            JSONArray array = new JSONArray(raw);
-            for (int i = 0; i < array.length(); i++) {
-                JSONObject item = array.getJSONObject(i);
-                Uri uri = Uri.parse(item.getString("uri"));
-                tracks.add(new Track(item.optString("title", "Audio track"),
-                        item.optString("artist", "Unknown artist"), item.optString("album", ""),
-                        uri, item.optLong("album_id", -1), null));
+        loadingSavedTracks = true;
+        ioExecutor.execute(() -> {
+            List<Track> savedTracks = new ArrayList<>();
+            boolean invalidData = false;
+            try {
+                JSONArray array = new JSONArray(raw);
+                for (int i = 0; i < array.length(); i++) {
+                    JSONObject item = array.getJSONObject(i);
+                    Uri uri = Uri.parse(item.getString("uri"));
+                    savedTracks.add(new Track(item.optString("title", "Audio track"),
+                            item.optString("artist", "Unknown artist"), item.optString("album", ""),
+                            uri, item.optLong("album_id", -1), null));
+                }
+            } catch (JSONException e) {
+                invalidData = true;
             }
-        } catch (JSONException ignored) {
-            prefs.edit().remove(AUDIO_LIST).apply();
-        }
+            boolean removeInvalidData = invalidData;
+            runOnUiThread(() -> {
+                loadingSavedTracks = false;
+                if (isFinishing() || isDestroyed()) return;
+                if (removeInvalidData) prefs.edit().remove(AUDIO_LIST).apply();
+                tracks.clear();
+                tracks.addAll(savedTracks);
+                restoreQueue();
+                if (tracks.isEmpty() && !tracksLoaded && "Music".equals(activeScreen)) loadTracks();
+                if ("Music".equals(activeScreen)) showMusic();
+            });
+        });
     }
 
     private void saveQueue() {
@@ -1617,19 +2868,24 @@ public class MainActivity extends AppCompatActivity {
     }
 
     private void saveTrackList() {
-        JSONArray array = new JSONArray();
-        for (Track track : tracks) {
-            try {
-                JSONObject item = new JSONObject();
-                item.put("title", track.title);
-                item.put("artist", track.artist);
-                item.put("album", track.album);
-                item.put("uri", track.uri.toString());
-                item.put("album_id", track.albumId);
-                array.put(item);
-            } catch (JSONException ignored) { }
-        }
-        prefs.edit().putString(AUDIO_LIST, array.toString()).apply();
+        List<Track> snapshot = new ArrayList<>(tracks);
+        persistenceExecutor.execute(() -> {
+            JSONArray array = new JSONArray();
+            for (Track track : snapshot) {
+                try {
+                    JSONObject item = new JSONObject();
+                    item.put("title", track.title);
+                    item.put("artist", track.artist);
+                    item.put("album", track.album);
+                    item.put("uri", track.uri.toString());
+                    item.put("album_id", track.albumId);
+                    array.put(item);
+                } catch (JSONException e) {
+                    android.util.Log.w("FocusMusic", "Unable to serialize a music library entry.", e);
+                }
+            }
+            prefs.edit().putString(AUDIO_LIST, array.toString()).apply();
+        });
     }
 
     private void requestAudioPermission() {
@@ -1866,6 +3122,25 @@ public class MainActivity extends AppCompatActivity {
             readerPlayerButton.setIconResource(playing ? R.drawable.ic_pause : R.drawable.ic_play_arrow);
             readerPlayerButton.setContentDescription(playing ? "Pause music" : "Play music");
         }
+        refreshMiniPlayer();
+    }
+
+    private void refreshMiniPlayer() {
+        if (miniPlayerTitle != null) miniPlayerTitle.setText(currentTrackTitle());
+        if (miniPlayerArtist != null) miniPlayerArtist.setText(currentTrackArtist());
+        if (miniPlayerArtwork != null) {
+            if (playingTrack >= 0 && playingTrack < tracks.size()) {
+                requestArtwork(tracks.get(playingTrack), miniPlayerArtwork);
+            } else {
+                miniPlayerArtwork.setImageDrawable(null);
+                miniPlayerArtwork.setBackground(makeArtworkBackground());
+            }
+        }
+        if (miniPlayerPlayButton != null) {
+            boolean playing = isAudioPlaying();
+            miniPlayerPlayButton.setIconResource(playing ? R.drawable.ic_pause : R.drawable.ic_play_arrow);
+            miniPlayerPlayButton.setContentDescription(playing ? "Pause music" : "Play music");
+        }
     }
 
     private void showPdfLibrary() {
@@ -1902,7 +3177,9 @@ public class MainActivity extends AppCompatActivity {
             params.topMargin = dp(18);
             list.addView(empty, params);
         }
-        for (PdfItem pdf : pdfs) {
+        int displayedPdfs = Math.min(pdfs.size(), visiblePdfCount);
+        for (int pdfIndex = 0; pdfIndex < displayedPdfs; pdfIndex++) {
+            PdfItem pdf = pdfs.get(pdfIndex);
             MaterialCardView item = card();
             LinearLayout details = row();
             details.setPadding(dp(10), dp(9), dp(8), dp(9));
@@ -1930,7 +3207,7 @@ public class MainActivity extends AppCompatActivity {
                 ProgressBar progressBar = new ProgressBar(this, null, android.R.attr.progressBarStyleHorizontal);
                 progressBar.setMax(100);
                 progressBar.setProgress(Math.min(100, (savedPage + 1) * 100 / pageCount));
-                progressBar.setProgressTintList(android.content.res.ColorStateList.valueOf(Color.rgb(108, 99, 255)));
+                progressBar.setProgressTintList(android.content.res.ColorStateList.valueOf(Color.rgb(34, 158, 217)));
                 LinearLayout.LayoutParams barParams = new LinearLayout.LayoutParams(-1, dp(3));
                 barParams.topMargin = dp(5);
                 textDetails.addView(progressBar, barParams);
@@ -1950,14 +3227,7 @@ public class MainActivity extends AppCompatActivity {
             LinearLayout.LayoutParams params = new LinearLayout.LayoutParams(-1, -2);
             params.topMargin = dp(5);
             list.addView(item, params);
-            ioExecutor.execute(() -> {
-                Bitmap cover = renderPdfThumbnail(pdf);
-                runOnUiThread(() -> {
-                    if (!isFinishing() && cover != null && pdf.uri.equals(thumbnail.getTag())) {
-                        thumbnail.setImageBitmap(cover);
-                    }
-                });
-            });
+            requestPdfThumbnail(pdf, thumbnail);
             item.setOnClickListener(v -> openPdf(pdf));
             item.setOnLongClickListener(v -> {
                 new MaterialAlertDialogBuilder(this).setTitle(pdf.title)
@@ -1975,6 +3245,17 @@ public class MainActivity extends AppCompatActivity {
                         }).show();
                 return true;
             });
+        }
+        if (pdfs.size() > displayedPdfs) {
+            MaterialButton loadMore = button("Load more");
+            loadMore.setMinHeight(dp(44));
+            loadMore.setOnClickListener(v -> {
+                visiblePdfCount += LIBRARY_PAGE_SIZE;
+                showPdfLibrary();
+            });
+            LinearLayout.LayoutParams moreParams = new LinearLayout.LayoutParams(-1, dp(44));
+            moreParams.topMargin = dp(8);
+            list.addView(loadMore, moreParams);
         }
         showScreen("PDF library", scroll(list));
     }
@@ -1994,26 +3275,98 @@ public class MainActivity extends AppCompatActivity {
     }
 
     private Bitmap renderPdfThumbnail(PdfItem pdf) {
-        try (ParcelFileDescriptor descriptor = getContentResolver().openFileDescriptor(pdf.uri, "r")) {
-            if (descriptor == null) return null;
-            PdfRenderer thumbnailRenderer = new PdfRenderer(descriptor);
-            if (thumbnailRenderer.getPageCount() == 0) {
-                thumbnailRenderer.close();
-                return null;
+        String key = pdf.uri.toString();
+        Bitmap cached = readBitmapCache("pdf-covers", key);
+        if (cached != null) return cached;
+        File stagedFile = null;
+        try {
+            stagedFile = copyPdfToCache(pdf.uri);
+            try (ParcelFileDescriptor descriptor = ParcelFileDescriptor.open(
+                    stagedFile, ParcelFileDescriptor.MODE_READ_ONLY);
+                 PdfRenderer thumbnailRenderer = new PdfRenderer(descriptor)) {
+                if (thumbnailRenderer.getPageCount() == 0) {
+                    android.util.Log.w("FocusPdf", "PDF has no pages: " + pdf.uri);
+                    return null;
+                }
+                Bitmap bitmap;
+                try (PdfRenderer.Page page = thumbnailRenderer.openPage(0)) {
+                    float scale = Math.min(120f / page.getWidth(), 160f / page.getHeight());
+                    int width = Math.max(1, Math.round(page.getWidth() * scale));
+                    int height = Math.max(1, Math.round(page.getHeight() * scale));
+                    bitmap = Bitmap.createBitmap(width, height, Bitmap.Config.ARGB_8888);
+                    bitmap.eraseColor(Color.WHITE);
+                    page.render(bitmap, null, null, PdfRenderer.Page.RENDER_MODE_FOR_DISPLAY);
+                }
+                writeBitmapCache("pdf-covers", key, bitmap);
+                return bitmap;
             }
-            PdfRenderer.Page page = thumbnailRenderer.openPage(0);
-            float scale = Math.min(120f / page.getWidth(), 160f / page.getHeight());
-            int width = Math.max(1, Math.round(page.getWidth() * scale));
-            int height = Math.max(1, Math.round(page.getHeight() * scale));
-            Bitmap bitmap = Bitmap.createBitmap(width, height, Bitmap.Config.ARGB_8888);
-            bitmap.eraseColor(Color.WHITE);
-            page.render(bitmap, null, null, PdfRenderer.Page.RENDER_MODE_FOR_DISPLAY);
-            page.close();
-            thumbnailRenderer.close();
-            return bitmap;
-        } catch (IOException | RuntimeException ignored) {
+        } catch (IOException | RuntimeException | OutOfMemoryError e) {
+            android.util.Log.w("FocusPdf", "Unable to generate PDF cover: " + pdf.uri, e);
             return null;
+        } finally {
+            deleteStagedPdf(stagedFile);
         }
+    }
+
+    private File copyPdfToCache(Uri uri) throws IOException {
+        File directory = new File(getCacheDir(), "pdf-staging");
+        if (!directory.isDirectory() && !directory.mkdirs()) {
+            throw new IOException("Unable to create PDF staging directory");
+        }
+        File stagedFile = File.createTempFile("focus-", ".pdf", directory);
+        boolean copied = false;
+        try (java.io.InputStream input = getContentResolver().openInputStream(uri);
+             java.io.OutputStream output = new java.io.BufferedOutputStream(
+                     new FileOutputStream(stagedFile))) {
+            if (input == null) throw new IOException("PDF provider returned no input stream");
+            byte[] buffer = new byte[32 * 1024];
+            int count;
+            while ((count = input.read(buffer)) != -1) output.write(buffer, 0, count);
+            output.flush();
+            copied = true;
+            return stagedFile;
+        } finally {
+            if (!copied) deleteStagedPdf(stagedFile);
+        }
+    }
+
+    private void deleteStagedPdf(@Nullable File file) {
+        if (file != null && file.exists() && !file.delete()) {
+            android.util.Log.w("FocusPdf", "Unable to delete staged PDF file: " + file);
+        }
+    }
+
+    private void requestPdfThumbnail(PdfItem pdf, ImageView target) {
+        if (Build.VERSION.SDK_INT <= Build.VERSION_CODES.N_MR1) return;
+        String key = pdf.uri.toString();
+        target.setTag(key);
+        Bitmap cached = pdfCoverCache.get(key);
+        if (cached != null && !cached.isRecycled()) {
+            target.setImageBitmap(cached);
+            target.setBackground(null);
+            return;
+        }
+        if (!pdfCoverLoads.add(key)) return;
+        pdfExecutor.execute(() -> {
+            Bitmap cover = renderPdfThumbnail(pdf);
+            runOnUiThread(() -> {
+                pdfCoverLoads.remove(key);
+                if (isFinishing() || isDestroyed()) {
+                    if (cover != null) cover.recycle();
+                    return;
+                }
+                if (cover == null) return;
+                if (pdfCoverCache.size() >= 32) {
+                    String oldestKey = pdfCoverCache.keySet().iterator().next();
+                    pdfCoverCache.remove(oldestKey);
+                }
+                pdfCoverCache.put(key, cover);
+                if (key.equals(target.getTag())) {
+                    target.setImageBitmap(cover);
+                    target.setBackground(null);
+                }
+            });
+        });
     }
 
     private void scanPdfFolder(Uri treeUri) {
@@ -2028,13 +3381,10 @@ public class MainActivity extends AppCompatActivity {
                 scanPdfChildren(treeUri, rootId, found, seen, 0);
                 runOnUiThread(() -> {
                     int added = 0;
+                    Set<String> savedUris = new HashSet<>();
+                    for (PdfItem saved : pdfs) savedUris.add(saved.uri.toString());
                     for (PdfItem pdf : found) {
-                        boolean exists = false;
-                        for (PdfItem saved : pdfs) if (saved.uri.equals(pdf.uri)) {
-                            exists = true;
-                            break;
-                        }
-                        if (!exists) {
+                        if (savedUris.add(pdf.uri.toString())) {
                             pdfs.add(pdf);
                             added++;
                         }
@@ -2225,15 +3575,17 @@ public class MainActivity extends AppCompatActivity {
 
     @SuppressLint("SourceLockedOrientationActivity")
     private void openPdf(PdfItem pdf) {
+        AppDiagnostics.record("PDF_OPEN_REQUEST api=" + Build.VERSION.SDK_INT);
         isHome = false;
         activeScreen = "PDF reader";
         closePdf();
         activePdf = pdf;
         prefs.edit().putString("last_pdf_uri", pdf.uri.toString()).apply();
-        currentPage = prefs.getInt("pdf_page:" + pdf.uri, 0);
-        pageRotated = prefs.getBoolean("pdf_rotate:" + pdf.uri, false);
+        currentPage = Math.max(0, prefs.getInt("pdf_page:" + pdf.uri, 0));
+        pageRotated = Build.VERSION.SDK_INT <= Build.VERSION_CODES.N_MR1
+                || prefs.getBoolean("pdf_rotate:" + pdf.uri, false);
         readerControlsVisible = true;
-        setRequestedOrientation(android.content.pm.ActivityInfo.SCREEN_ORIENTATION_UNSPECIFIED);
+        setRequestedOrientation(android.content.pm.ActivityInfo.SCREEN_ORIENTATION_LANDSCAPE);
         readerRoot = new FrameLayout(this);
         readerRoot.setBackgroundColor(Color.rgb(17, 19, 24));
         LinearLayout reader = column();
@@ -2245,21 +3597,41 @@ public class MainActivity extends AppCompatActivity {
         readerNavbar.setHorizontalScrollBarEnabled(false);
         readerNavbar.setFillViewport(false);
         readerNavbar.setBackgroundColor(Color.rgb(29, 32, 40));
+        readerNavbar.setElevation(dp(3));
         readerNavbar.addView(readerControls);
         readerTimerLabel = text("", 12, Color.WHITE);
         readerControls.addView(readerTimerLabel);
         readerTimerButton = iconButton(timerRunning ? R.drawable.ic_pause : R.drawable.ic_play_arrow,
                 timerRunning ? "Pause Pomodoro timer" : "Start Pomodoro timer", this::toggleTimer);
         readerControls.addView(readerTimerButton);
+        readerPreviousButton = iconButton(R.drawable.ic_arrow_back, "Previous PDF page",
+                () -> renderPage(currentPage - 1));
+        readerControls.addView(readerPreviousButton);
         readerPageLabel = text("", 12, Color.LTGRAY);
         readerPageLabel.setGravity(Gravity.CENTER);
+        readerPageLabel.setMaxWidth(dp(150));
+        readerPageLabel.setSingleLine(true);
+        readerPageLabel.setEllipsize(android.text.TextUtils.TruncateAt.END);
         readerControls.addView(readerPageLabel);
+        readerPageSeekBar = new SeekBar(this);
+        readerPageSeekBar.setMax(0);
+        readerPageSeekBar.setProgressTintList(android.content.res.ColorStateList.valueOf(Color.rgb(34, 158, 217)));
+        readerPageSeekBar.setThumbTintList(android.content.res.ColorStateList.valueOf(Color.rgb(85, 196, 161)));
+        readerPageSeekBar.setContentDescription("Navigate PDF pages");
+        readerPageSeekBar.setOnSeekBarChangeListener(new SeekBar.OnSeekBarChangeListener() {
+            @Override public void onProgressChanged(SeekBar seekBar, int progress, boolean fromUser) { }
+            @Override public void onStartTrackingTouch(SeekBar seekBar) { }
+            @Override public void onStopTrackingTouch(SeekBar seekBar) {
+                renderPage(seekBar.getProgress());
+            }
+        });
+        readerControls.addView(readerPageSeekBar, new LinearLayout.LayoutParams(dp(104), dp(48)));
         TextInputEditText pageJump = new TextInputEditText(this);
         pageJump.setInputType(android.text.InputType.TYPE_CLASS_NUMBER);
         pageJump.setSingleLine(true);
         pageJump.setTextSize(12);
         pageJump.setTextColor(Color.WHITE);
-        pageJump.setHint("Page");
+        pageJump.setHint(fa("Page"));
         pageJump.setHintTextColor(Color.GRAY);
         pageJump.setMinWidth(dp(64));
         pageJump.setImeOptions(android.view.inputmethod.EditorInfo.IME_ACTION_GO);
@@ -2268,11 +3640,11 @@ public class MainActivity extends AppCompatActivity {
                     || event != null && event.getKeyCode() == android.view.KeyEvent.KEYCODE_ENTER) {
                 try {
                     int requestedPage = Integer.parseInt(String.valueOf(view.getText())) - 1;
-                    if (requestedPage >= 0 && renderer != null && requestedPage < renderer.getPageCount()) {
+                    if (requestedPage >= 0 && requestedPage < pdfPageCount) {
                         renderPage(requestedPage);
                     } else {
                         Toast.makeText(this, "Enter a page from 1 to "
-                                + (renderer == null ? 0 : renderer.getPageCount()), Toast.LENGTH_SHORT).show();
+                                + pdfPageCount, Toast.LENGTH_SHORT).show();
                     }
                 } catch (NumberFormatException ignored) {
                     Toast.makeText(this, "Enter a valid page number", Toast.LENGTH_SHORT).show();
@@ -2290,12 +3662,9 @@ public class MainActivity extends AppCompatActivity {
         readerPlayerButton = iconButton(isAudioPlaying() ? R.drawable.ic_pause : R.drawable.ic_play_arrow,
                 isAudioPlaying() ? "Pause music" : "Play music", this::togglePlayback);
         readerControls.addView(readerPlayerButton);
-        MaterialButton prev = iconButton(R.drawable.ic_arrow_back, "Previous PDF page",
-                () -> renderPage(currentPage - 1));
-        readerControls.addView(prev);
-        MaterialButton next = iconButton(R.drawable.ic_arrow_forward, "Next PDF page",
+        readerNextButton = iconButton(R.drawable.ic_arrow_forward, "Next PDF page",
                 () -> renderPage(currentPage + 1));
-        readerControls.addView(next);
+        readerControls.addView(readerNextButton);
         MaterialButton rotate = iconButton(R.drawable.ic_rotate_right, "Rotate PDF page", () -> {
             pageRotated = !pageRotated;
             prefs.edit().putBoolean("pdf_rotate:" + activePdf.uri, pageRotated).apply();
@@ -2308,8 +3677,14 @@ public class MainActivity extends AppCompatActivity {
         MaterialButton hide = iconButton(R.drawable.ic_visibility_off, "Hide reader controls",
                 this::toggleReaderControls);
         readerControls.addView(hide);
-        reader.addView(readerNavbar, new LinearLayout.LayoutParams(-1, dp(48)));
+        reader.addView(readerNavbar, new LinearLayout.LayoutParams(-1, dp(56)));
+        pdfLoading = new ProgressBar(this);
+        LinearLayout.LayoutParams loadingParams = new LinearLayout.LayoutParams(dp(40), dp(40));
+        loadingParams.gravity = Gravity.CENTER_HORIZONTAL;
+        loadingParams.topMargin = dp(16);
+        reader.addView(pdfLoading, loadingParams);
         pdfImage = new PdfPageView();
+        pdfImage.setVisibility(View.GONE);
         LinearLayout.LayoutParams imageParams = new LinearLayout.LayoutParams(-1, 0, 1);
         reader.addView(pdfImage, imageParams);
         readerRoot.addView(reader);
@@ -2321,17 +3696,100 @@ public class MainActivity extends AppCompatActivity {
         show.setVisibility(View.GONE);
         readerRoot.setTag(show);
         setScreenContent(readerRoot, false);
-        try {
-            pdfDescriptor = getContentResolver().openFileDescriptor(pdf.uri, "r");
-            if (pdfDescriptor == null) throw new IOException("Unable to open document");
-            renderer = new PdfRenderer(pdfDescriptor);
-            if (renderer.getPageCount() == 0) throw new IOException("PDF has no pages");
-            currentPage = Math.min(currentPage, renderer.getPageCount() - 1);
-            prefs.edit().putInt("pdf_pages:" + pdf.uri, renderer.getPageCount()).apply();
-            renderPage(currentPage);
-        } catch (IOException | SecurityException e) {
-            closePdf();
-            promptReconnectPdf(pdf);
+        getWindow().addFlags(WindowManager.LayoutParams.FLAG_KEEP_SCREEN_ON);
+        if (Build.VERSION.SDK_INT <= Build.VERSION_CODES.N_MR1) {
+            try {
+                pdfDescriptor = getContentResolver().openFileDescriptor(pdf.uri, "r");
+                if (pdfDescriptor == null) throw new IOException("Unable to open document");
+                renderer = new PdfRenderer(pdfDescriptor);
+                pdfPageCount = renderer.getPageCount();
+                if (pdfPageCount == 0) throw new IOException("PDF has no pages");
+                currentPage = Math.min(currentPage, pdfPageCount - 1);
+                prefs.edit().putInt("pdf_pages:" + pdf.uri, pdfPageCount).apply();
+                AppDiagnostics.record("PDF_RENDERER_OPENED pages=" + pdfPageCount);
+                renderPage(currentPage);
+            } catch (IOException | RuntimeException | OutOfMemoryError e) {
+                AppDiagnostics.record("PDF_OPEN_FAILURE type=" + e.getClass().getSimpleName());
+                android.util.Log.e("FocusPdf", "Unable to open PDF with Android 7 renderer.", e);
+                closePdf();
+                Toast.makeText(this, "بازکردن این PDF ممکن نشد؛ گزارش خطا را از تنظیمات ارسال کنید.",
+                        Toast.LENGTH_LONG).show();
+                showPdfLibrary();
+            }
+            return;
+        }
+        int requestId = pdfRenderRequestId.incrementAndGet();
+        pdfExecutor.execute(() -> {
+            File stagedFile = null;
+            ParcelFileDescriptor descriptor = null;
+            PdfRenderer openedRenderer = null;
+            try {
+                stagedFile = copyPdfToCache(pdf.uri);
+                descriptor = ParcelFileDescriptor.open(stagedFile, ParcelFileDescriptor.MODE_READ_ONLY);
+                openedRenderer = new PdfRenderer(descriptor);
+                int pageCount = openedRenderer.getPageCount();
+                if (pageCount == 0) throw new IOException("PDF has no pages");
+                boolean attached;
+                synchronized (pdfLock) {
+                    attached = requestId == pdfRenderRequestId.get() && !isFinishing() && !isDestroyed();
+                    if (attached) {
+                        pdfDescriptor = descriptor;
+                        renderer = openedRenderer;
+                        activePdfFile = stagedFile;
+                        pdfPageCount = pageCount;
+                    }
+                }
+                if (!attached) {
+                    closeUnattachedPdf(openedRenderer, descriptor);
+                    deleteStagedPdf(stagedFile);
+                    return;
+                }
+                currentPage = Math.min(currentPage, pageCount - 1);
+                prefs.edit().putInt("pdf_pages:" + pdf.uri, pageCount).apply();
+                AppDiagnostics.record("PDF_RENDERER_OPENED pages=" + pageCount);
+                renderPage(currentPage);
+            } catch (SecurityException e) {
+                AppDiagnostics.record("PDF_OPEN_FAILURE type=SecurityException");
+                closeUnattachedPdf(openedRenderer, descriptor);
+                deleteStagedPdf(stagedFile);
+                runOnUiThread(() -> {
+                    if (requestId == pdfRenderRequestId.get() && !isFinishing()) {
+                        closePdf();
+                        promptReconnectPdf(pdf);
+                    }
+                });
+            } catch (IOException | RuntimeException | OutOfMemoryError e) {
+                AppDiagnostics.record("PDF_OPEN_FAILURE type=" + e.getClass().getSimpleName());
+                closeUnattachedPdf(openedRenderer, descriptor);
+                deleteStagedPdf(stagedFile);
+                android.util.Log.e("FocusPdf", "Unable to open PDF: " + pdf.uri, e);
+                runOnUiThread(() -> {
+                    if (requestId == pdfRenderRequestId.get() && !isFinishing()) {
+                        closePdf();
+                        Toast.makeText(this, "این فایل PDF باز نشد؛ فایل دیگری را امتحان کنید.",
+                                Toast.LENGTH_LONG).show();
+                        showPdfLibrary();
+                    }
+                });
+            }
+        });
+    }
+
+    private void closeUnattachedPdf(@Nullable PdfRenderer openedRenderer,
+                                    @Nullable ParcelFileDescriptor descriptor) {
+        if (openedRenderer != null) {
+            try {
+                openedRenderer.close();
+            } catch (RuntimeException e) {
+                android.util.Log.w("FocusPdf", "Unable to close PDF renderer cleanly.", e);
+            }
+        }
+        if (descriptor != null) {
+            try {
+                descriptor.close();
+            } catch (IOException | RuntimeException e) {
+                android.util.Log.w("FocusPdf", "Unable to close PDF file descriptor.", e);
+            }
         }
     }
 
@@ -2363,37 +3821,124 @@ public class MainActivity extends AppCompatActivity {
     }
 
     private void renderPage(int pageNumber) {
-        if (renderer == null || pdfImage == null) return;
-        if (pageNumber < 0 || pageNumber >= renderer.getPageCount()) return;
+        if (pdfImage == null || pageNumber < 0 || pageNumber >= pdfPageCount) return;
+        final PdfRenderer pageRenderer;
+        pageRenderer = renderer;
+        if (pageRenderer == null) return;
         currentPage = pageNumber;
+        if (Build.VERSION.SDK_INT <= Build.VERSION_CODES.N_MR1) {
+            renderLegacyPdfPage(pageRenderer, pageNumber);
+            return;
+        }
+        int requestId = pdfRenderRequestId.incrementAndGet();
+        boolean rotate = pageRotated;
+        Uri pdfUri = activePdf == null ? null : activePdf.uri;
+        pdfExecutor.execute(() -> {
+            Bitmap display = null;
+            try {
+                if (requestId != pdfRenderRequestId.get() || renderer != pageRenderer) return;
+                try (PdfRenderer.Page page = pageRenderer.openPage(pageNumber)) {
+                    float scale = Math.min(2f, 1200f / Math.max(page.getWidth(), page.getHeight()));
+                    int width = Math.max(1, Math.round(page.getWidth() * scale));
+                    int height = Math.max(1, Math.round(page.getHeight() * scale));
+                    Bitmap original = Bitmap.createBitmap(width, height, Bitmap.Config.ARGB_8888);
+                    display = original;
+                    original.eraseColor(Color.WHITE);
+                    page.render(original, null, null, PdfRenderer.Page.RENDER_MODE_FOR_DISPLAY);
+                    if (rotate) {
+                        Matrix matrix = new Matrix();
+                        matrix.postRotate(90);
+                        display = Bitmap.createBitmap(original, 0, 0, original.getWidth(),
+                                original.getHeight(), matrix, true);
+                        if (display != original) original.recycle();
+                    }
+                }
+                Bitmap renderedBitmap = display;
+                runOnUiThread(() -> {
+                    if (requestId != pdfRenderRequestId.get() || renderer != pageRenderer
+                            || pdfImage == null || isFinishing() || isDestroyed()) {
+                        if (!renderedBitmap.isRecycled()) renderedBitmap.recycle();
+                        return;
+                    }
+                    pdfImage.setBitmap(renderedBitmap);
+                    pdfImage.setVisibility(View.VISIBLE);
+                    if (pdfLoading != null) pdfLoading.setVisibility(View.GONE);
+                    updateReaderPageNavigation(pageNumber);
+                    if (pdfUri != null) prefs.edit().putInt("pdf_page:" + pdfUri, pageNumber).apply();
+                });
+            } catch (RuntimeException | OutOfMemoryError e) {
+                if (display != null && !display.isRecycled()) display.recycle();
+                android.util.Log.e("FocusPdf", "Unable to render PDF page " + (pageNumber + 1), e);
+                runOnUiThread(() -> {
+                    if (requestId == pdfRenderRequestId.get() && !isFinishing()) {
+                        if (pdfLoading != null) pdfLoading.setVisibility(View.GONE);
+                        Toast.makeText(this, "این صفحهٔ PDF قابل نمایش نیست.", Toast.LENGTH_SHORT).show();
+                    }
+                });
+            }
+        });
+    }
+
+    private void renderLegacyPdfPage(PdfRenderer pageRenderer, int pageNumber) {
         PdfRenderer.Page page = null;
+        Bitmap original = null;
         try {
-            page = renderer.openPage(currentPage);
+            AppDiagnostics.record("PDF_PAGE_RENDER_START page=" + (pageNumber + 1));
+            page = pageRenderer.openPage(pageNumber);
             int width = Math.max(1, page.getWidth() * 2);
             int height = Math.max(1, page.getHeight() * 2);
-            float maxDim = Math.max(width, height);
-            if (maxDim > 1600) {
-                width = Math.round(width * 1600f / maxDim);
-                height = Math.round(height * 1600f / maxDim);
+            float maxDimension = Math.max(width, height);
+            if (maxDimension > 1600) {
+                width = Math.max(1, Math.round(width * 1600f / maxDimension));
+                height = Math.max(1, Math.round(height * 1600f / maxDimension));
             }
-            Bitmap original = Bitmap.createBitmap(width, height, Bitmap.Config.ARGB_8888);
+            original = Bitmap.createBitmap(width, height, Bitmap.Config.ARGB_8888);
             original.eraseColor(Color.WHITE);
             page.render(original, null, null, PdfRenderer.Page.RENDER_MODE_FOR_DISPLAY);
             Bitmap display = original;
             if (pageRotated) {
                 Matrix matrix = new Matrix();
                 matrix.postRotate(90);
-                display = Bitmap.createBitmap(original, 0, 0, original.getWidth(), original.getHeight(), matrix, true);
-                if (display != original) original.recycle();
+                display = Bitmap.createBitmap(original, 0, 0, original.getWidth(),
+                        original.getHeight(), matrix, true);
+                if (display != original) {
+                    original.recycle();
+                    original = null;
+                }
             }
             pdfImage.setBitmap(display);
-            readerPageLabel.setText(getString(R.string.pdf_page_status, activePdf.title, currentPage + 1, renderer.getPageCount()));
-            prefs.edit().putInt("pdf_page:" + activePdf.uri, currentPage).apply();
-        } catch (RuntimeException e) {
-            Toast.makeText(this, "Unable to render this PDF page.", Toast.LENGTH_SHORT).show();
+            pdfImage.setVisibility(View.VISIBLE);
+            if (pdfLoading != null) pdfLoading.setVisibility(View.GONE);
+            updateReaderPageNavigation(pageNumber);
+            if (activePdf != null) {
+                prefs.edit().putInt("pdf_page:" + activePdf.uri, pageNumber).apply();
+            }
+            AppDiagnostics.record("PDF_PAGE_RENDER_SUCCESS page=" + (pageNumber + 1));
+        } catch (RuntimeException | OutOfMemoryError e) {
+            if (original != null && !original.isRecycled()) original.recycle();
+            AppDiagnostics.record("PDF_PAGE_RENDER_FAILURE page=" + (pageNumber + 1)
+                    + " type=" + e.getClass().getSimpleName());
+            android.util.Log.e("FocusPdf", "Unable to render PDF page " + (pageNumber + 1), e);
+            if (pdfLoading != null) pdfLoading.setVisibility(View.GONE);
+            Toast.makeText(this, "نمایش این صفحه ممکن نشد؛ گزارش خطا را از تنظیمات ارسال کنید.",
+                    Toast.LENGTH_LONG).show();
         } finally {
             if (page != null) page.close();
         }
+    }
+
+    private void updateReaderPageNavigation(int pageNumber) {
+        String title = activePdf == null ? "" : activePdf.title;
+        if (readerPageLabel != null) {
+            readerPageLabel.setText(getString(R.string.pdf_page_status,
+                    title, pageNumber + 1, pdfPageCount));
+        }
+        if (readerPageSeekBar != null) {
+            readerPageSeekBar.setMax(Math.max(0, pdfPageCount - 1));
+            readerPageSeekBar.setProgress(pageNumber);
+        }
+        if (readerPreviousButton != null) readerPreviousButton.setEnabled(pageNumber > 0);
+        if (readerNextButton != null) readerNextButton.setEnabled(pageNumber < pdfPageCount - 1);
     }
 
     private void addFiveMinutes() {
@@ -2407,7 +3952,7 @@ public class MainActivity extends AppCompatActivity {
             prefs.edit().putLong("timer_duration", durationMillis).putLong("timer_remaining", remainingMillis).apply();
         }
         updateTimerDisplay();
-        Toast.makeText(this, "Added 5 minutes to your focus timer.", Toast.LENGTH_SHORT).show();
+        Toast.makeText(this, fa("Added 5 minutes to your focus timer."), Toast.LENGTH_SHORT).show();
     }
 
     private void toggleReaderControls() {
@@ -2418,24 +3963,41 @@ public class MainActivity extends AppCompatActivity {
     }
 
     private void closePdf() {
-        if (renderer != null) {
-            renderer.close();
+        pdfRenderRequestId.incrementAndGet();
+        PdfRenderer rendererToClose;
+        ParcelFileDescriptor descriptorToClose;
+        File fileToDelete;
+        synchronized (pdfLock) {
+            rendererToClose = renderer;
+            descriptorToClose = pdfDescriptor;
+            fileToDelete = activePdfFile;
             renderer = null;
-        }
-        if (pdfDescriptor != null) {
-            try {
-                pdfDescriptor.close();
-            } catch (IOException ignored) { }
             pdfDescriptor = null;
+            activePdfFile = null;
+            pdfPageCount = 0;
         }
+        if (rendererToClose != null || descriptorToClose != null || fileToDelete != null) {
+            Runnable closeResources = () -> {
+                closeUnattachedPdf(rendererToClose, descriptorToClose);
+                deleteStagedPdf(fileToDelete);
+            };
+            if (pdfExecutor.isShutdown()) closeResources.run();
+            else pdfExecutor.execute(closeResources);
+        }
+        if (pdfImage != null) pdfImage.clearBitmap();
+        getWindow().clearFlags(WindowManager.LayoutParams.FLAG_KEEP_SCREEN_ON);
         activePdf = null;
         pdfImage = null;
+        pdfLoading = null;
         readerControls = null;
         readerNavbar = null;
         readerTimerLabel = null;
         readerTimerButton = null;
         readerPlayerLabel = null;
         readerPlayerButton = null;
+        readerPreviousButton = null;
+        readerNextButton = null;
+        readerPageSeekBar = null;
         readerPageLabel = null;
         readerRoot = null;
     }
@@ -2479,7 +4041,7 @@ public class MainActivity extends AppCompatActivity {
             android.widget.CheckBox checkBox = new android.widget.CheckBox(this);
             checkBox.setText(app.loadLabel(getPackageManager()));
             checkBox.setTextColor(Color.WHITE);
-            checkBox.setButtonTintList(android.content.res.ColorStateList.valueOf(Color.rgb(166, 161, 255)));
+            checkBox.setButtonTintList(android.content.res.ColorStateList.valueOf(Color.rgb(60, 180, 230)));
             checkBox.setChecked(selected.contains(packageName));
             checkBox.setOnCheckedChangeListener((buttonView, checked) -> {
                 java.util.Set<String> updated = new java.util.HashSet<>(prefs.getStringSet(BLOCKED_APPS, Collections.emptySet()));
@@ -2539,6 +4101,31 @@ public class MainActivity extends AppCompatActivity {
         PdfItem(String title, Uri uri) { this.title = title; this.uri = uri; }
     }
 
+    private static class PlannerTask {
+        final String id;
+        final String title;
+        final String details;
+        final long dueAt;
+        final long remindAt;
+        boolean done;
+        String noteDate;
+
+        PlannerTask(String id, String title, String details, long dueAt, long remindAt, boolean done) {
+            this.id = id;
+            this.title = title;
+            this.details = details == null ? "" : details;
+            this.dueAt = dueAt;
+            this.remindAt = remindAt;
+            this.done = done;
+        }
+
+        PlannerTask withValues(String newTitle, String newDetails, long newDueAt, long newRemindAt) {
+            PlannerTask updated = new PlannerTask(id, newTitle, newDetails, newDueAt, newRemindAt, done);
+            updated.noteDate = noteDate;
+            return updated;
+        }
+    }
+
     private final class PdfPageView extends View {
         private final Paint pagePaint = new Paint(Paint.ANTI_ALIAS_FLAG | Paint.FILTER_BITMAP_FLAG);
         private final ScaleGestureDetector scaleDetector;
@@ -2558,7 +4145,7 @@ public class MainActivity extends AppCompatActivity {
         PdfPageView() {
             super(MainActivity.this);
             setBackgroundColor(Color.rgb(17, 19, 24));
-            setLayerType(View.LAYER_TYPE_HARDWARE, null);
+            setLayerType(View.LAYER_TYPE_SOFTWARE, null);
             scaleDetector = new ScaleGestureDetector(MainActivity.this, new ScaleGestureDetector.SimpleOnScaleGestureListener() {
                 @Override
                 public boolean onScale(ScaleGestureDetector detector) {
@@ -2716,6 +4303,12 @@ public class MainActivity extends AppCompatActivity {
                     event.getX(second) - event.getX(first)));
         }
 
+        void clearBitmap() {
+            if (bitmap != null && !bitmap.isRecycled()) bitmap.recycle();
+            bitmap = null;
+            invalidate();
+        }
+
         @Override
         public boolean performClick() {
             super.performClick();
@@ -2738,7 +4331,7 @@ public class MainActivity extends AppCompatActivity {
             progressPaint.setStyle(Paint.Style.STROKE);
             progressPaint.setStrokeCap(Paint.Cap.ROUND);
             progressPaint.setStrokeWidth(dp(5));
-            progressPaint.setColor(Color.rgb(108, 99, 255));
+            progressPaint.setColor(Color.rgb(34, 158, 217));
             setImportantForAccessibility(View.IMPORTANT_FOR_ACCESSIBILITY_NO);
         }
 

@@ -1,6 +1,11 @@
 <resources>
     <string name="app_name">Focus</string>
-    <string name="focus_guard_service">Focus app blocker</string>
+    <string name="navigation_home">تمرکز</string>
+    <string name="navigation_notes">یادداشت</string>
+    <string name="navigation_reminders">یادآورها</string>
+    <string name="navigation_pdfs">PDF</string>
+    <string name="navigation_music">موسیقی</string>
+    <string name="focus_guard_service">مسدودکنندهٔ برنامه‌ها</string>
     <string name="pdf_page_status">%1$s · %2$d / %3$d</string>
     <string name="reader_timer_status">%1$s · %2$s</string>
     <string name="track_artist_status">%1$s · %2$s</string>

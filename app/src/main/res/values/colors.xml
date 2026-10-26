@@ -1,0 +1,7 @@
+<resources>
+    <color name="focus_primary">#229ED9</color>
+    <color name="focus_on_surface_muted">#B2B6C1</color>
+    <color name="focus_surface">#1D2028</color>
+    <color name="focus_navigation">#181A21</color>
+    <color name="focus_navigation_selected">#262833</color>
+</resources>

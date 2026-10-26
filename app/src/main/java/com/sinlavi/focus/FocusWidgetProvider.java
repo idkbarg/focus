@@ -51,7 +51,7 @@ public class FocusWidgetProvider extends AppWidgetProvider {
         views.setImageViewResource(R.id.widget_toggle,
                 running ? R.drawable.ic_pause : R.drawable.ic_play_arrow);
         views.setContentDescription(R.id.widget_toggle,
-                running ? "Pause focus timer" : "Start or resume focus timer");
+                running ? "توقف موقت زمان‌سنج تمرکز" : "شروع زمان‌سنج تمرکز");
 
         Intent open = new Intent(context, MainActivity.class);
         open.setFlags(Intent.FLAG_ACTIVITY_NEW_TASK | Intent.FLAG_ACTIVITY_CLEAR_TOP);
@@ -69,8 +69,8 @@ public class FocusWidgetProvider extends AppWidgetProvider {
     }
 
     private static String phaseLabel(String phase) {
-        if ("short_break".equals(phase)) return "SHORT BREAK";
-        if ("long_break".equals(phase)) return "LONG BREAK";
-        return "STUDY SESSION";
+        if ("short_break".equals(phase)) return "استراحت کوتاه";
+        if ("long_break".equals(phase)) return "استراحت بلند";
+        return "جلسهٔ تمرکز";
     }
 }
