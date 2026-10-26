@@ -1,0 +1,50 @@
+<?xml version="1.0" encoding="utf-8"?>
+<LinearLayout xmlns:android="http://schemas.android.com/apk/res/android"
+    xmlns:app="http://schemas.android.com/apk/res-auto"
+    android:layout_width="match_parent"
+    android:layout_height="match_parent"
+    android:background="#1D2028"
+    android:gravity="center_vertical"
+    android:minHeight="72dp"
+    android:orientation="horizontal"
+    android:padding="12dp">
+
+    <LinearLayout
+        android:id="@+id/widget_open"
+        android:layout_width="0dp"
+        android:layout_height="match_parent"
+        android:layout_weight="1"
+        android:gravity="center_vertical"
+        android:orientation="vertical">
+
+        <TextView
+            android:id="@+id/widget_phase"
+            android:layout_width="wrap_content"
+            android:layout_height="wrap_content"
+            android:letterSpacing="0.08"
+            android:text="STUDY SESSION"
+            android:textColor="#B9BDE1"
+            android:textSize="11sp" />
+
+        <Chronometer
+            android:id="@+id/widget_time"
+            android:layout_width="wrap_content"
+            android:layout_height="wrap_content"
+            android:layout_marginTop="2dp"
+            android:fontFamily="sans-serif-medium"
+            android:format="%s"
+            android:text="25:00"
+            android:textColor="#F5F6FA"
+            android:textSize="28sp" />
+    </LinearLayout>
+
+    <ImageButton
+        android:id="@+id/widget_toggle"
+        android:layout_width="48dp"
+        android:layout_height="48dp"
+        android:background="@drawable/widget_icon_background"
+        android:contentDescription="Start or pause focus timer"
+        android:scaleType="center"
+        android:src="@drawable/ic_play_arrow"
+        android:tint="#FFFFFF" />
+</LinearLayout>

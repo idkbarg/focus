@@ -22,6 +22,7 @@ import android.media.AudioFormat;
 import android.media.AudioTrack;
 import android.media.MediaPlayer;
 import android.media.MediaMetadataRetriever;
+import android.app.NotificationManager;
 import android.net.Uri;
 import android.os.Build;
 import android.os.Bundle;
@@ -29,6 +30,9 @@ import android.os.Handler;
 import android.os.Looper;
 import android.os.ParcelFileDescriptor;
 import android.os.SystemClock;
+import android.content.BroadcastReceiver;
+import android.content.Context;
+import android.content.IntentFilter;
 import android.provider.MediaStore;
 import android.provider.DocumentsContract;
 import android.provider.OpenableColumns;
@@ -43,6 +47,7 @@ import android.widget.LinearLayout;
 import android.widget.ScrollView;
 import android.widget.TextView;
 import android.widget.HorizontalScrollView;
+import android.widget.GridLayout;
 import android.widget.ProgressBar;
 import android.widget.Toast;
 
@@ -73,7 +78,9 @@ import java.util.List;
 import java.util.Locale;
 import java.util.Map;
 import java.util.HashSet;
+import java.util.LinkedHashSet;
 import java.util.Set;
+import java.util.HashMap;
 import java.util.concurrent.ExecutorService;
 import java.util.concurrent.Executors;
 
@@ -82,15 +89,25 @@ public class MainActivity extends AppCompatActivity {
     private static final int REQUEST_PDF = 11;
     private static final int REQUEST_AUDIO = 12;
     private static final int REQUEST_PDF_FOLDER = 13;
+    private static final int REQUEST_PDF_RECONNECT = 14;
     private static final String PREFS = "focus_data";
+    public static final String EXTRA_WIDGET_ACTION = "widget_action";
+    public static final String WIDGET_ACTION_TOGGLE_TIMER = "toggle_timer";
+    public static final String WIDGET_ACTION_OPEN_APP = "open_app";
     private static final String PDF_LIST = "pdf_library";
+    private static final String AUDIO_LIST = "audio_library";
     private static final String BLOCKED_APPS = "blocked_apps";
     private static final long TICK_MS = 1000;
+    private static final int ICON_SIZE_DP = 20;
+    private static final int ICON_TARGET_DP = 48;
+    private static final String HOME_APP_SHORTCUTS = "home_app_shortcuts";
     private final Handler handler = new Handler(Looper.getMainLooper());
     private final List<Track> tracks = new ArrayList<>();
     private final List<Integer> queue = new ArrayList<>();
     private final List<PdfItem> pdfs = new ArrayList<>();
     private final ExecutorService ioExecutor = Executors.newSingleThreadExecutor();
+    private final Map<String, Bitmap> artworkCache = new HashMap<>();
+    private final Set<String> artworkLoads = new HashSet<>();
     private android.content.SharedPreferences prefs;
     private LinearLayout screen;
     private TextView timerText;
@@ -120,6 +137,8 @@ public class MainActivity extends AppCompatActivity {
     private boolean timerRunning;
     private String timerPhase = "focus";
     private boolean scanningPdfs;
+    private boolean loadingTracks;
+    private boolean tracksLoaded;
     private PdfRenderer renderer;
     private ParcelFileDescriptor pdfDescriptor;
     private PdfItem activePdf;
@@ -150,6 +169,8 @@ public class MainActivity extends AppCompatActivity {
     protected void onCreate(@Nullable Bundle savedInstanceState) {
         super.onCreate(savedInstanceState);
         prefs = getSharedPreferences(PREFS, MODE_PRIVATE);
+        loadSavedTracks();
+        restoreQueue();
         timerPhase = prefs.getString("timer_phase", "focus");
         durationMillis = prefs.getLong("timer_duration", durationForPhase(timerPhase));
         remainingMillis = prefs.getLong("timer_remaining", durationMillis);
@@ -172,6 +193,7 @@ public class MainActivity extends AppCompatActivity {
             }
         }
         buildHome();
+        handleWidgetAction(getIntent());
         if (timerRunning) handler.post(timerTick);
     }
 
@@ -182,6 +204,19 @@ public class MainActivity extends AppCompatActivity {
             prefs.edit().putBoolean("focus_guard_active", true).apply();
         }
         if ("Focus guard".equals(activeScreen)) showFocusGuard();
+    }
+
+    @Override
+    protected void onNewIntent(Intent intent) {
+        super.onNewIntent(intent);
+        setIntent(intent);
+        handleWidgetAction(intent);
+    }
+
+    private void handleWidgetAction(Intent intent) {
+        if (intent == null || !WIDGET_ACTION_TOGGLE_TIMER.equals(intent.getStringExtra(EXTRA_WIDGET_ACTION))) return;
+        intent.removeExtra(EXTRA_WIDGET_ACTION);
+        toggleTimer();
     }
 
     @Override
@@ -198,6 +233,7 @@ public class MainActivity extends AppCompatActivity {
     @Override
     protected void onDestroy() {
         handler.removeCallbacks(timerTick);
+        saveQueue();
         ioExecutor.shutdownNow();
         releaseAudio();
         closePdf();
@@ -246,17 +282,18 @@ public class MainActivity extends AppCompatActivity {
         MaterialButton button = new MaterialButton(this);
         button.setText("");
         button.setIconResource(icon);
-        button.setIconTintList(android.content.res.ColorStateList.valueOf(Color.WHITE));
-        button.setIconSize(dp(22));
+        button.setIconGravity(MaterialButton.ICON_GRAVITY_TEXT_START);
+        button.setIconTint(android.content.res.ColorStateList.valueOf(Color.WHITE));
+        button.setIconSize(dp(ICON_SIZE_DP));
         button.setIconPadding(0);
         button.setInsetTop(0);
         button.setInsetBottom(0);
-        button.setMinWidth(dp(44));
-        button.setMinimumWidth(dp(44));
-        button.setMinHeight(dp(44));
-        button.setMinimumHeight(dp(44));
+        button.setMinWidth(dp(ICON_TARGET_DP));
+        button.setMinimumWidth(dp(ICON_TARGET_DP));
+        button.setMinHeight(dp(ICON_TARGET_DP));
+        button.setMinimumHeight(dp(ICON_TARGET_DP));
         button.setPadding(0, 0, 0, 0);
-        button.setCornerRadius(dp(24));
+        button.setCornerRadius(dp(ICON_TARGET_DP / 2f));
         button.setContentDescription(description);
         button.setBackgroundTintList(android.content.res.ColorStateList.valueOf(Color.rgb(47, 51, 62)));
         button.setOnClickListener(v -> action.run());
@@ -315,6 +352,10 @@ public class MainActivity extends AppCompatActivity {
     }
 
     private void setScreenContent(View root) {
+        setScreenContent(root, true);
+    }
+
+    private void setScreenContent(View root, boolean withNavigation) {
         int left = root.getPaddingLeft();
         int top = root.getPaddingTop();
         int right = root.getPaddingRight();
@@ -325,7 +366,53 @@ public class MainActivity extends AppCompatActivity {
                     right + systemBars.right, bottom + systemBars.bottom);
             return insets;
         });
-        setContentView(root);
+        if (!withNavigation) {
+            setContentView(root);
+            return;
+        }
+        FrameLayout shell = new FrameLayout(this);
+        FrameLayout.LayoutParams contentParams = new FrameLayout.LayoutParams(-1, -1);
+        contentParams.bottomMargin = dp(72);
+        shell.addView(root, contentParams);
+        shell.addView(bottomNavigation(), new FrameLayout.LayoutParams(-1, dp(72), Gravity.BOTTOM));
+        setContentView(shell);
+    }
+
+    private LinearLayout bottomNavigation() {
+        LinearLayout navigation = row();
+        navigation.setGravity(Gravity.CENTER);
+        navigation.setBackgroundColor(Color.rgb(24, 26, 33));
+        navigation.setElevation(dp(8));
+        navigation.setMinimumHeight(dp(72));
+        addNavigationItem(navigation, R.drawable.ic_focus, "Timer", "home", this::buildHome);
+        addNavigationItem(navigation, R.drawable.ic_picture_as_pdf, "PDFs", "PDF library", this::showPdfLibrary);
+        addNavigationItem(navigation, R.drawable.ic_music_note, "Music", "Music", this::showMusic);
+        addNavigationItem(navigation, R.drawable.ic_edit, "Notes", "Notes", this::showNotes);
+        return navigation;
+    }
+
+    private void addNavigationItem(LinearLayout parent, int icon, String label, String destination,
+                                   Runnable action) {
+        LinearLayout item = column();
+        item.setGravity(Gravity.CENTER);
+        item.setMinimumHeight(dp(72));
+        item.setContentDescription(label);
+        item.setClickable(true);
+        item.setFocusable(true);
+        item.setImportantForAccessibility(View.IMPORTANT_FOR_ACCESSIBILITY_YES);
+        if (Build.VERSION.SDK_INT >= 28) item.setAccessibilityPaneTitle(label);
+        boolean selected = activeScreen.equals(destination)
+                || "home".equals(destination) && activeScreen.equals("home");
+        item.setBackgroundColor(selected ? Color.rgb(38, 40, 51) : Color.TRANSPARENT);
+        ImageView iconView = new ImageView(this);
+        iconView.setImageResource(icon);
+        int foreground = selected ? Color.rgb(166, 161, 255) : Color.rgb(178, 182, 193);
+        iconView.setImageTintList(android.content.res.ColorStateList.valueOf(foreground));
+        item.addView(iconView, new LinearLayout.LayoutParams(dp(24), dp(24)));
+        TextView text = text(label, 11, foreground);
+        item.addView(text);
+        item.setOnClickListener(v -> action.run());
+        parent.addView(item, new LinearLayout.LayoutParams(0, dp(72), 1));
     }
 
     private ScrollView scroll(View child) {
@@ -342,7 +429,7 @@ public class MainActivity extends AppCompatActivity {
         closePdf();
         setRequestedOrientation(android.content.pm.ActivityInfo.SCREEN_ORIENTATION_UNSPECIFIED);
         LinearLayout content = column();
-        content.setPadding(0, dp(8), 0, dp(8));
+        content.setPadding(dp(20), dp(20), dp(20), dp(20));
         LinearLayout brand = row();
         TextView greeting = text("FOCUS", 13, Color.rgb(166, 161, 255));
         greeting.setLetterSpacing(0.18f);
@@ -371,6 +458,7 @@ public class MainActivity extends AppCompatActivity {
         timerText = text("", 46, Color.WHITE);
         timerText.setTypeface(Typeface.create("sans-serif-light", Typeface.NORMAL));
         timerText.setGravity(Gravity.CENTER);
+        timerText.setImportantForAccessibility(View.IMPORTANT_FOR_ACCESSIBILITY_NO);
         timerText.setContentDescription("Time remaining in focus session");
         clock.addView(timerText, new FrameLayout.LayoutParams(-1, -1));
         LinearLayout.LayoutParams clockParams = new LinearLayout.LayoutParams(-1, dp(166));
@@ -386,6 +474,28 @@ public class MainActivity extends AppCompatActivity {
         startParams.topMargin = dp(10);
         timerContent.addView(timerButton, startParams);
         timerButton.setOnClickListener(v -> toggleTimer());
+        LinearLayout timerActions = row();
+        timerActions.setGravity(Gravity.CENTER);
+        timerActions.setPadding(0, dp(8), 0, 0);
+        MaterialButton resetTimer = button("Reset");
+        resetTimer.setIconResource(R.drawable.ic_rotate_right);
+        resetTimer.setIconGravity(MaterialButton.ICON_GRAVITY_TEXT_START);
+        resetTimer.setIconTint(android.content.res.ColorStateList.valueOf(Color.WHITE));
+        resetTimer.setBackgroundTintList(android.content.res.ColorStateList.valueOf(Color.rgb(47, 51, 62)));
+        resetTimer.setOnClickListener(v -> resetTimer());
+        LinearLayout.LayoutParams resetParams = new LinearLayout.LayoutParams(dp(112), dp(44));
+        resetParams.rightMargin = dp(8);
+        resetTimer.setMinHeight(dp(48));
+        timerActions.addView(resetTimer, resetParams);
+        MaterialButton skipTimer = button("Skip");
+        skipTimer.setIconResource(R.drawable.ic_skip_next);
+        skipTimer.setIconGravity(MaterialButton.ICON_GRAVITY_TEXT_START);
+        skipTimer.setIconTint(android.content.res.ColorStateList.valueOf(Color.WHITE));
+        skipTimer.setBackgroundTintList(android.content.res.ColorStateList.valueOf(Color.rgb(47, 51, 62)));
+        skipTimer.setOnClickListener(v -> skipTimerPhase());
+        skipTimer.setMinHeight(dp(48));
+        timerActions.addView(skipTimer, new LinearLayout.LayoutParams(dp(112), dp(48)));
+        timerContent.addView(timerActions);
         timerCard.addView(timerContent);
         LinearLayout.LayoutParams timerParams = new LinearLayout.LayoutParams(-1, -2);
         timerParams.bottomMargin = dp(16);
@@ -403,13 +513,19 @@ public class MainActivity extends AppCompatActivity {
         statsParams.bottomMargin = dp(12);
         content.addView(stats, statsParams);
 
-        LinearLayout actions = row();
-        actions.setGravity(Gravity.CENTER);
-        addAction(actions, R.drawable.ic_edit, "Notes", this::showNotes);
-        addAction(actions, R.drawable.ic_music_note, "Music", this::showMusic);
-        addAction(actions, R.drawable.ic_picture_as_pdf, "PDFs", this::showPdfLibrary);
+        TextView shortcutsTitle = text("QUICK ACCESS", 11, Color.rgb(166, 161, 255));
+        shortcutsTitle.setTypeface(null, Typeface.BOLD);
+        shortcutsTitle.setLetterSpacing(0.08f);
+        LinearLayout.LayoutParams shortcutsTitleParams = new LinearLayout.LayoutParams(-1, -2);
+        shortcutsTitleParams.bottomMargin = dp(8);
+        content.addView(shortcutsTitle, shortcutsTitleParams);
+        GridLayout actions = new GridLayout(this);
+        actions.setColumnCount(2);
+        actions.setUseDefaultMargins(false);
+        for (HomeShortcut shortcut : homeShortcuts()) addAction(actions, shortcut);
+        addAction(actions, new HomeShortcut("Add shortcut", R.drawable.ic_add, null, null));
         LinearLayout.LayoutParams actionsParams = new LinearLayout.LayoutParams(-1, -2);
-        actionsParams.bottomMargin = dp(12);
+        actionsParams.bottomMargin = dp(16);
         content.addView(actions, actionsParams);
 
         LinearLayout bottom = column();
@@ -436,6 +552,9 @@ public class MainActivity extends AppCompatActivity {
         recentContent.addView(recentDetails, recentDetailsParams);
         recentContent.addView(text(lastPdfStatus, 12, Color.rgb(166, 161, 255)));
         recent.addView(recentContent);
+        recent.setMinimumHeight(dp(72));
+        recent.setClickable(true);
+        recent.setFocusable(true);
         recent.setContentDescription("Continue reading " + recentTitle.getText() + ", " + lastPdfStatus);
         recent.setOnClickListener(v -> openLastPdf());
         bottom.addView(recent);
@@ -482,25 +601,168 @@ public class MainActivity extends AppCompatActivity {
         refreshHomePlayer();
     }
 
-    private void addAction(LinearLayout parent, int icon, String label, Runnable action) {
-        LinearLayout item = column();
-        item.setGravity(Gravity.CENTER);
-        item.setContentDescription(label);
-        ImageView circle = new ImageView(this);
-        circle.setImageResource(icon);
-        circle.setImageTintList(android.content.res.ColorStateList.valueOf(Color.WHITE));
-        android.graphics.drawable.GradientDrawable shape = new android.graphics.drawable.GradientDrawable();
-        shape.setColor(Color.rgb(47, 51, 62));
-        shape.setShape(android.graphics.drawable.GradientDrawable.OVAL);
-        circle.setBackground(shape);
-        circle.setContentDescription(label);
-        item.addView(circle, new LinearLayout.LayoutParams(dp(50), dp(50)));
-        TextView caption = text(label, 13, Color.LTGRAY);
-        LinearLayout.LayoutParams captionParams = new LinearLayout.LayoutParams(-2, -2);
-        captionParams.topMargin = dp(7);
-        item.addView(caption, captionParams);
-        item.setOnClickListener(v -> action.run());
-        parent.addView(item, new LinearLayout.LayoutParams(0, -2, 1));
+    private List<HomeShortcut> homeShortcuts() {
+        List<HomeShortcut> shortcuts = new ArrayList<>();
+        shortcuts.add(new HomeShortcut("Notes", R.drawable.ic_edit, this::showNotes, null));
+        shortcuts.add(new HomeShortcut("Music", R.drawable.ic_music_note, this::showMusic, null));
+        shortcuts.add(new HomeShortcut("PDF library", R.drawable.ic_picture_as_pdf, this::showPdfLibrary, null));
+        Set<String> installedPackages = new LinkedHashSet<>(
+                prefs.getStringSet(HOME_APP_SHORTCUTS, Collections.emptySet()));
+        Set<String> unavailablePackages = new HashSet<>();
+        for (String packageName : installedPackages) {
+            Intent launchIntent = getPackageManager().getLaunchIntentForPackage(packageName);
+            if (launchIntent == null) {
+                unavailablePackages.add(packageName);
+                continue;
+            }
+            try {
+                shortcuts.add(new HomeShortcut(
+                        String.valueOf(getPackageManager().getApplicationLabel(
+                                getPackageManager().getApplicationInfo(packageName, 0))),
+                        0, () -> launchShortcut(packageName), packageName));
+            } catch (PackageManager.NameNotFoundException ignored) {
+                unavailablePackages.add(packageName);
+            }
+        }
+        if (!unavailablePackages.isEmpty()) {
+            installedPackages.removeAll(unavailablePackages);
+            prefs.edit().putStringSet(HOME_APP_SHORTCUTS, installedPackages).apply();
+        }
+        return shortcuts;
+    }
+
+    private void addAction(GridLayout parent, HomeShortcut shortcut) {
+        MaterialCardView item = new MaterialCardView(this);
+        item.setRadius(dp(16));
+        item.setCardElevation(0);
+        item.setStrokeWidth(dp(1));
+        item.setStrokeColor(Color.rgb(47, 51, 62));
+        item.setCardBackgroundColor(Color.rgb(29, 32, 40));
+        item.setClickable(true);
+        item.setFocusable(true);
+        item.setContentDescription(shortcut.label);
+        item.setMinimumHeight(dp(92));
+
+        LinearLayout content = column();
+        content.setGravity(Gravity.CENTER);
+        content.setPadding(dp(8), dp(14), dp(8), dp(12));
+        ImageView glyph = new ImageView(this);
+        if (shortcut.packageName == null) {
+            glyph.setImageResource(shortcut.icon);
+        } else {
+            try {
+                glyph.setImageDrawable(getPackageManager().getApplicationIcon(shortcut.packageName));
+            } catch (PackageManager.NameNotFoundException ignored) {
+                glyph.setImageResource(R.drawable.ic_focus);
+            }
+        }
+        if (shortcut.packageName == null) {
+            glyph.setImageTintList(android.content.res.ColorStateList.valueOf(Color.rgb(166, 161, 255)));
+        }
+        glyph.setImportantForAccessibility(View.IMPORTANT_FOR_ACCESSIBILITY_NO);
+        content.addView(glyph, new LinearLayout.LayoutParams(dp(22), dp(22)));
+        TextView caption = text(shortcut.label, 12, Color.WHITE);
+        caption.setMaxLines(1);
+        caption.setEllipsize(android.text.TextUtils.TruncateAt.END);
+        caption.setGravity(Gravity.CENTER);
+        caption.setImportantForAccessibility(View.IMPORTANT_FOR_ACCESSIBILITY_NO);
+        LinearLayout.LayoutParams captionParams = new LinearLayout.LayoutParams(-1, -2);
+        captionParams.topMargin = dp(8);
+        content.addView(caption, captionParams);
+        item.addView(content);
+        item.setOnClickListener(v -> {
+            if (shortcut.action == null) chooseHomeAppShortcut();
+            else shortcut.action.run();
+        });
+        if (shortcut.packageName != null) {
+            item.setOnLongClickListener(v -> {
+                new MaterialAlertDialogBuilder(this)
+                        .setTitle(shortcut.label)
+                        .setMessage("Remove this app from Quick access?")
+                        .setNegativeButton("Cancel", null)
+                        .setPositiveButton("Remove", (dialog, which) -> {
+                            Set<String> packages = new LinkedHashSet<>(
+                                    prefs.getStringSet(HOME_APP_SHORTCUTS, Collections.emptySet()));
+                            packages.remove(shortcut.packageName);
+                            prefs.edit().putStringSet(HOME_APP_SHORTCUTS, packages).apply();
+                            buildHome();
+                        })
+                        .show();
+                return true;
+            });
+        }
+
+        GridLayout.LayoutParams params = new GridLayout.LayoutParams(
+                GridLayout.spec(GridLayout.UNDEFINED, 1f),
+                GridLayout.spec(GridLayout.UNDEFINED, 1f));
+        params.width = 0;
+        params.height = GridLayout.LayoutParams.WRAP_CONTENT;
+        params.setMargins(0, 0, dp(8), dp(8));
+        parent.addView(item, params);
+    }
+
+    private void chooseHomeAppShortcut() {
+        Intent launcherIntent = new Intent(Intent.ACTION_MAIN).addCategory(Intent.CATEGORY_LAUNCHER);
+        List<ResolveInfo> launchableApps = getPackageManager().queryIntentActivities(launcherIntent, 0);
+        Collections.sort(launchableApps, (first, second) ->
+                String.valueOf(first.loadLabel(getPackageManager()))
+                        .compareToIgnoreCase(String.valueOf(second.loadLabel(getPackageManager()))));
+        Set<String> addedPackages = new HashSet<>(
+                prefs.getStringSet(HOME_APP_SHORTCUTS, Collections.emptySet()));
+        Set<String> seenPackages = new HashSet<>();
+        List<ResolveInfo> choices = new ArrayList<>();
+        for (ResolveInfo app : launchableApps) {
+            String packageName = app.activityInfo.packageName;
+            if (packageName.equals(getPackageName()) || addedPackages.contains(packageName)
+                    || !seenPackages.add(packageName)) continue;
+            choices.add(app);
+        }
+        if (choices.isEmpty()) {
+            Toast.makeText(this, "No more apps are available to add.", Toast.LENGTH_SHORT).show();
+            return;
+        }
+        String[] labels = new String[choices.size()];
+        for (int i = 0; i < choices.size(); i++) {
+            labels[i] = String.valueOf(choices.get(i).loadLabel(getPackageManager()));
+        }
+        new MaterialAlertDialogBuilder(this)
+                .setTitle("Add an app shortcut")
+                .setItems(labels, (dialog, which) -> {
+                    String packageName = choices.get(which).activityInfo.packageName;
+                    Set<String> packages = new LinkedHashSet<>(
+                            prefs.getStringSet(HOME_APP_SHORTCUTS, Collections.emptySet()));
+                    packages.add(packageName);
+                    prefs.edit().putStringSet(HOME_APP_SHORTCUTS, packages).apply();
+                    buildHome();
+                })
+                .show();
+    }
+
+    private void launchShortcut(String packageName) {
+        Intent launchIntent = getPackageManager().getLaunchIntentForPackage(packageName);
+        if (launchIntent == null) {
+            Toast.makeText(this, "This app is no longer available.", Toast.LENGTH_SHORT).show();
+            return;
+        }
+        try {
+            startActivity(launchIntent);
+        } catch (android.content.ActivityNotFoundException | SecurityException e) {
+            Toast.makeText(this, "This app could not be opened.", Toast.LENGTH_SHORT).show();
+        }
+    }
+
+    private static final class HomeShortcut {
+        final String label;
+        final int icon;
+        final Runnable action;
+        final String packageName;
+
+        HomeShortcut(String label, int icon, Runnable action, String packageName) {
+            this.label = label;
+            this.icon = icon;
+            this.action = action;
+            this.packageName = packageName;
+        }
     }
 
     private android.graphics.drawable.Drawable makeArtworkBackground() {
@@ -517,6 +779,7 @@ public class MainActivity extends AppCompatActivity {
         timerText.setText(String.format(Locale.getDefault(), "%02d:%02d", seconds / 60, seconds % 60));
         timerProgress.setProgress(remainingMillis, durationMillis);
         timerButton.setText(timerRunning ? "Pause" : remainingMillis < durationMillis ? "Resume" : "Start");
+        timerButton.setContentDescription(timerRunning ? "Pause timer" : "Start or resume timer");
         if (timerStatus != null) timerStatus.setText(phaseTitle(timerPhase).toUpperCase(Locale.getDefault()));
         if (statsSummary != null) statsSummary.setText(todayStatsText());
         if (readerTimerLabel != null) readerTimerLabel.setText(getString(
@@ -525,6 +788,45 @@ public class MainActivity extends AppCompatActivity {
             readerTimerButton.setIconResource(timerRunning ? R.drawable.ic_pause : R.drawable.ic_play_arrow);
             readerTimerButton.setContentDescription(timerRunning ? "Pause Pomodoro timer" : "Resume Pomodoro timer");
         }
+    }
+
+    private void updateWidget() {
+        FocusWidgetProvider.updateAll(this);
+    }
+
+    private void playTimerChime() {
+        android.media.ToneGenerator tone = new android.media.ToneGenerator(
+                android.media.AudioManager.STREAM_NOTIFICATION, 55);
+        tone.startTone(android.media.ToneGenerator.TONE_PROP_BEEP, 180);
+        handler.postDelayed(tone::release, 250);
+    }
+
+    private void resetTimer() {
+        handler.removeCallbacks(timerTick);
+        timerRunning = false;
+        remainingMillis = durationMillis;
+        endAtElapsed = 0;
+        prefs.edit().remove("timer_end_wall").putLong("timer_remaining", remainingMillis)
+                .putBoolean("focus_guard_active", false).apply();
+        updateTimerDisplay();
+        updateWidget();
+        Toast.makeText(this, phaseTitle(timerPhase) + " timer reset", Toast.LENGTH_SHORT).show();
+    }
+
+    private void skipTimerPhase() {
+        handler.removeCallbacks(timerTick);
+        timerRunning = false;
+        timerPhase = nextPhase(timerPhase);
+        durationMillis = durationForPhase(timerPhase);
+        remainingMillis = durationMillis;
+        endAtElapsed = 0;
+        prefs.edit().putString("timer_phase", timerPhase).putLong("timer_duration", durationMillis)
+                .putLong("timer_remaining", remainingMillis).remove("timer_end_wall")
+                .putBoolean("focus_guard_active", false).apply();
+        updateTimerDisplay();
+        updateWidget();
+        Toast.makeText(this, "Skipped to " + phaseTitle(timerPhase).toLowerCase(Locale.getDefault()),
+                Toast.LENGTH_SHORT).show();
     }
 
     private void toggleTimer() {
@@ -544,6 +846,7 @@ public class MainActivity extends AppCompatActivity {
             handler.post(timerTick);
         }
         updateTimerDisplay();
+        updateWidget();
     }
 
     private void showDurationDialog() {
@@ -591,7 +894,87 @@ public class MainActivity extends AppCompatActivity {
         blockerParams.topMargin = dp(8);
         body.addView(blocker, blockerParams);
         blocker.setOnClickListener(v -> showFocusGuard());
+        TextView quietLabel = text("During-focus system controls", 15, Color.WHITE);
+        LinearLayout.LayoutParams quietParams = new LinearLayout.LayoutParams(-1, -2);
+        quietParams.topMargin = dp(18);
+        body.addView(quietLabel, quietParams);
+        body.addView(distractionSwitch("Do Not Disturb", "Manage Android notification access",
+                () -> openDoNotDisturbSettings(), () -> isDndAllowed()));
+        body.addView(distractionSwitch("Airplane mode", "Open Android network settings",
+                () -> startActivity(new Intent(Settings.ACTION_AIRPLANE_MODE_SETTINGS)),
+                () -> false));
+        TextView behaviorLabel = text("Session behavior", 15, Color.WHITE);
+        LinearLayout.LayoutParams behaviorParams = new LinearLayout.LayoutParams(-1, -2);
+        behaviorParams.topMargin = dp(18);
+        body.addView(behaviorLabel, behaviorParams);
+        body.addView(preferenceSwitch("Continue music", "Keep playback running when a session ends", "keep_music", true));
+        body.addView(preferenceSwitch("Auto-start breaks", "Start break timers without a confirmation", "auto_start_break", false));
+        body.addView(preferenceSwitch("Auto-start focus", "Continue automatically after a break", "auto_start_focus", false));
+        body.addView(preferenceSwitch("Gentle end chime", "Play a short cue when a phase ends", "session_chime", true));
         showScreen("Pomodoro settings", scroll(body));
+    }
+
+    private LinearLayout preferenceSwitch(String title, String description, String key, boolean defaultValue) {
+        return settingSwitch(title, description, prefs.getBoolean(key, defaultValue), checked ->
+                prefs.edit().putBoolean(key, checked).apply());
+    }
+
+    private interface BooleanChangedListener {
+        void onChanged(boolean checked);
+    }
+
+    private LinearLayout settingSwitch(String title, String description, boolean initialValue,
+                                       BooleanChangedListener onChanged) {
+        return settingSwitch(title, description, initialValue, onChanged, null);
+    }
+
+    private LinearLayout distractionSwitch(String title, String description, Runnable action,
+                                          java.util.concurrent.Callable<Boolean> status) {
+        boolean initialValue;
+        try {
+            initialValue = status.call();
+        } catch (Exception ignored) {
+            initialValue = false;
+        }
+        return settingSwitch(title, description, initialValue, checked -> { }, action);
+    }
+
+    private LinearLayout settingSwitch(String title, String description, boolean initialValue,
+                                       BooleanChangedListener onChanged, Runnable action) {
+        LinearLayout row = row();
+        row.setPadding(0, dp(8), 0, dp(8));
+        LinearLayout labels = column();
+        labels.addView(text(title, 14, Color.WHITE));
+        labels.addView(text(description, 11, Color.LTGRAY));
+        row.addView(labels, new LinearLayout.LayoutParams(0, -2, 1));
+        android.widget.Switch control = new android.widget.Switch(this);
+        control.setShowText(false);
+        control.setChecked(initialValue);
+        control.setContentDescription(title);
+        control.setOnCheckedChangeListener((button, checked) -> {
+            onChanged.onChanged(checked);
+            if (action != null) {
+                action.run();
+                button.postDelayed(() -> button.setChecked(isDndAllowed()), 700);
+            }
+        });
+        row.addView(control);
+        return row;
+    }
+
+    private void openDoNotDisturbSettings() {
+        if (Build.VERSION.SDK_INT < 23) {
+            Toast.makeText(this, "Do Not Disturb controls require Android 6 or newer.", Toast.LENGTH_LONG).show();
+            return;
+        }
+        startActivity(new Intent(Settings.ACTION_NOTIFICATION_POLICY_ACCESS_SETTINGS));
+    }
+
+    private boolean isDndAllowed() {
+        if (Build.VERSION.SDK_INT < 23) return false;
+        NotificationManager manager = (NotificationManager) getSystemService(NOTIFICATION_SERVICE);
+        return manager != null && manager.isNotificationPolicyAccessGranted()
+                && manager.getCurrentInterruptionFilter() != NotificationManager.INTERRUPTION_FILTER_ALL;
     }
 
     private TextInputEditText settingsField(String hint, int value) {
@@ -647,10 +1030,18 @@ public class MainActivity extends AppCompatActivity {
         durationMillis = durationForPhase(timerPhase);
         remainingMillis = durationMillis;
         endAtElapsed = 0;
+        boolean autoStart = "focus".equals(timerPhase)
+                ? prefs.getBoolean("auto_start_focus", false)
+                : prefs.getBoolean("auto_start_break", false);
         prefs.edit().putString("timer_phase", timerPhase).putLong("timer_duration", durationMillis)
                 .putLong("timer_remaining", remainingMillis).remove("timer_end_wall")
                 .putBoolean("focus_guard_active", false).apply();
         updateTimerDisplay();
+        if (autoStart) {
+            toggleTimer();
+        } else {
+            if (prefs.getBoolean("session_chime", true)) playTimerChime();
+        }
         Toast.makeText(this, phaseTitle(completedPhase) + " complete · " + phaseTitle(timerPhase) + " is ready",
                 Toast.LENGTH_LONG).show();
     }
@@ -699,7 +1090,7 @@ public class MainActivity extends AppCompatActivity {
         TextView noteHeading = text("Your days", 15, Color.WHITE);
         notesToolbar.addView(noteHeading, new LinearLayout.LayoutParams(0, -2, 1));
         MaterialButton addToday = button("+ Today");
-        addToday.setMinHeight(dp(40));
+        addToday.setMinHeight(dp(48));
         addToday.setOnClickListener(v -> showNoteEditor(todayKey()));
         notesToolbar.addView(addToday);
         list.addView(notesToolbar);
@@ -743,6 +1134,10 @@ public class MainActivity extends AppCompatActivity {
             chevron.setImageTintList(android.content.res.ColorStateList.valueOf(Color.LTGRAY));
             noteContent.addView(chevron, new LinearLayout.LayoutParams(dp(24), dp(24)));
             noteCard.addView(noteContent);
+            noteCard.setMinimumHeight(dp(72));
+            noteCard.setClickable(true);
+            noteCard.setFocusable(true);
+            noteCard.setContentDescription(prettyDate(date) + ". " + preview);
             noteCard.setOnClickListener(v -> showNoteEditor(date));
             noteCard.setOnLongClickListener(v -> {
                 new MaterialAlertDialogBuilder(this).setTitle(prettyDate(date))
@@ -819,7 +1214,7 @@ public class MainActivity extends AppCompatActivity {
     private void showMusic() {
         LinearLayout list = column();
         list.setPadding(0, dp(4), 0, dp(12));
-        if (tracks.isEmpty()) loadTracks();
+        if (tracks.isEmpty() && !tracksLoaded) loadTracks();
         MaterialCardView noise = card();
         LinearLayout noiseRow = row();
         noiseRow.setPadding(dp(12), dp(9), dp(12), dp(9));
@@ -858,7 +1253,9 @@ public class MainActivity extends AppCompatActivity {
         libraryActions.addView(add, new LinearLayout.LayoutParams(0, dp(42), 1));
         MaterialButton queueButton = button("Queue " + queue.size());
         queueButton.setIconResource(R.drawable.ic_queue_music);
-        queueButton.setIconTintList(android.content.res.ColorStateList.valueOf(Color.WHITE));
+        queueButton.setIconTint(android.content.res.ColorStateList.valueOf(Color.WHITE));
+        queueButton.setMinHeight(dp(48));
+        queueButton.setContentDescription("Open playback queue with " + queue.size() + " tracks");
         queueButton.setOnClickListener(v -> showQueue());
         LinearLayout.LayoutParams queueParams = new LinearLayout.LayoutParams(0, dp(42), 1);
         queueParams.leftMargin = dp(8);
@@ -903,7 +1300,7 @@ public class MainActivity extends AppCompatActivity {
         for (Track track : tracks) if (!track.album.isEmpty()) albums.add(track.album);
         for (String album : albums) {
             MaterialButton chip = button(album);
-            chip.setMinHeight(dp(34));
+            chip.setMinHeight(dp(48));
             chip.setTextSize(11);
             chip.setOnClickListener(v -> musicSearch.setText(album));
             LinearLayout.LayoutParams chipParams = new LinearLayout.LayoutParams(-2, dp(36));
@@ -929,7 +1326,12 @@ public class MainActivity extends AppCompatActivity {
             }
             @Override public void afterTextChanged(android.text.Editable s) { }
         });
-        if (tracks.isEmpty() && !hasAudioPermission()) {
+        if (loadingTracks) {
+            TextView loading = text("Loading your music library…", 12, Color.LTGRAY);
+            LinearLayout.LayoutParams loadingParams = new LinearLayout.LayoutParams(-1, -2);
+            loadingParams.topMargin = dp(8);
+            list.addView(loading, loadingParams);
+        } else if (tracks.isEmpty() && !hasAudioPermission()) {
             TextView empty = text("Allow music access to scan your library, or add individual audio files.", 12, Color.LTGRAY);
             LinearLayout.LayoutParams emptyParams = new LinearLayout.LayoutParams(-1, -2);
             emptyParams.topMargin = dp(8);
@@ -959,13 +1361,7 @@ public class MainActivity extends AppCompatActivity {
             ImageView artwork = new ImageView(this);
             artwork.setScaleType(ImageView.ScaleType.CENTER_CROP);
             artwork.setBackground(makeArtworkBackground());
-            artwork.setTag(track.uri);
-            ioExecutor.execute(() -> {
-                Bitmap cover = loadArtwork(track);
-                runOnUiThread(() -> {
-                    if (cover != null && track.uri.equals(artwork.getTag())) artwork.setImageBitmap(cover);
-                });
-            });
+            requestArtwork(track, artwork);
             trackRow.addView(artwork, new LinearLayout.LayoutParams(dp(46), dp(46)));
             LinearLayout details = column();
             details.setGravity(Gravity.CENTER_VERTICAL);
@@ -985,10 +1381,15 @@ public class MainActivity extends AppCompatActivity {
                     isQueued ? "Remove from queue" : "Add to queue", () -> {
                         if (queue.contains(index)) queue.remove((Integer) index);
                         else queue.add(index);
+                        saveQueue();
                         showMusic();
                     });
             trackRow.addView(addQueue);
             trackCard.addView(trackRow);
+            trackCard.setMinimumHeight(dp(72));
+            trackCard.setClickable(true);
+            trackCard.setFocusable(true);
+            trackCard.setContentDescription("Play " + track.title + " by " + track.artist);
             LinearLayout.LayoutParams params = new LinearLayout.LayoutParams(-1, -2);
             params.topMargin = dp(4);
             target.addView(trackCard, params);
@@ -999,6 +1400,7 @@ public class MainActivity extends AppCompatActivity {
                             if (choice == 0) playTrack(index);
                             else if (choice == 1) {
                                 if (!queue.contains(index)) queue.add(index);
+                                saveQueue();
                                 showMusic();
                             } else if (!track.album.isEmpty() && musicSearch != null) musicSearch.setText(track.album);
                         }).show();
@@ -1013,11 +1415,23 @@ public class MainActivity extends AppCompatActivity {
         try {
             BitmapFactory.Options options = new BitmapFactory.Options();
             options.inJustDecodeBounds = true;
-            if (track.embeddedArtwork != null) {
-                BitmapFactory.decodeByteArray(track.embeddedArtwork, 0, track.embeddedArtwork.length, options);
+            byte[] embedded = track.embeddedArtwork;
+            if (embedded == null && artworkUri == null) {
+                MediaMetadataRetriever retriever = new MediaMetadataRetriever();
+                try {
+                    retriever.setDataSource(this, track.uri);
+                    embedded = retriever.getEmbeddedPicture();
+                } catch (RuntimeException ignored) {
+                    return null;
+                } finally {
+                    retriever.release();
+                }
+            }
+            if (embedded != null) {
+                BitmapFactory.decodeByteArray(embedded, 0, embedded.length, options);
                 options.inSampleSize = sampleSize(options, dp(96));
                 options.inJustDecodeBounds = false;
-                return BitmapFactory.decodeByteArray(track.embeddedArtwork, 0, track.embeddedArtwork.length, options);
+                return BitmapFactory.decodeByteArray(embedded, 0, embedded.length, options);
             }
             if (artworkUri == null) return null;
             try (java.io.InputStream bounds = getContentResolver().openInputStream(artworkUri)) {
@@ -1032,6 +1446,41 @@ public class MainActivity extends AppCompatActivity {
         } catch (Exception ignored) {
             return null;
         }
+    }
+
+    private void requestArtwork(Track track, ImageView target) {
+        String key = track.uri.toString();
+        target.setTag(key);
+        Bitmap cached = artworkCache.get(key);
+        if (cached != null) {
+            target.setImageBitmap(cached);
+            target.setBackground(null);
+            return;
+        }
+        target.setImageDrawable(null);
+        target.setBackground(makeArtworkBackground());
+        if (!artworkLoads.add(key)) return;
+        ioExecutor.execute(() -> {
+            Bitmap artwork = loadArtwork(track);
+            runOnUiThread(() -> {
+                artworkLoads.remove(key);
+                if (isFinishing() || isDestroyed()) {
+                    if (artwork != null) artwork.recycle();
+                    return;
+                }
+                if (artwork != null) {
+                    if (artworkCache.size() >= 48) {
+                        String oldestKey = artworkCache.keySet().iterator().next();
+                        artworkCache.remove(oldestKey);
+                    }
+                    artworkCache.put(key, artwork);
+                    if (key.equals(target.getTag())) {
+                        target.setImageBitmap(artwork);
+                        target.setBackground(null);
+                    }
+                }
+            });
+        });
     }
 
     private int sampleSize(BitmapFactory.Options options, int targetSize) {
@@ -1067,10 +1516,15 @@ public class MainActivity extends AppCompatActivity {
             row.addView(details, new LinearLayout.LayoutParams(0, -2, 1));
             MaterialButton remove = iconButton(R.drawable.ic_close, "Remove from queue", () -> {
                 queue.remove(queuePosition);
+                saveQueue();
                 showQueue();
             });
             row.addView(remove);
             item.addView(row);
+            item.setMinimumHeight(dp(72));
+            item.setClickable(true);
+            item.setFocusable(true);
+            item.setContentDescription("Play " + track.title + " from queue");
             LinearLayout.LayoutParams params = new LinearLayout.LayoutParams(-1, -2);
             params.topMargin = dp(5);
             list.addView(item, params);
@@ -1081,6 +1535,7 @@ public class MainActivity extends AppCompatActivity {
                             if (choice == 0) playTrack(trackIndex);
                             else {
                                 queue.remove((Integer) trackIndex);
+                                saveQueue();
                                 showQueue();
                             }
                         }).show();
@@ -1123,6 +1578,60 @@ public class MainActivity extends AppCompatActivity {
         return new Track(title, artist, album, uri, -1, artwork);
     }
 
+    private void loadSavedTracks() {
+        tracks.clear();
+        String raw = prefs.getString(AUDIO_LIST, "[]");
+        try {
+            JSONArray array = new JSONArray(raw);
+            for (int i = 0; i < array.length(); i++) {
+                JSONObject item = array.getJSONObject(i);
+                Uri uri = Uri.parse(item.getString("uri"));
+                tracks.add(new Track(item.optString("title", "Audio track"),
+                        item.optString("artist", "Unknown artist"), item.optString("album", ""),
+                        uri, item.optLong("album_id", -1), null));
+            }
+        } catch (JSONException ignored) {
+            prefs.edit().remove(AUDIO_LIST).apply();
+        }
+    }
+
+    private void saveQueue() {
+        JSONArray array = new JSONArray(queue);
+        prefs.edit().putString("music_queue", array.toString())
+                .putInt("music_current_track", playingTrack).apply();
+    }
+
+    private void restoreQueue() {
+        queue.clear();
+        try {
+            JSONArray array = new JSONArray(prefs.getString("music_queue", "[]"));
+            for (int i = 0; i < array.length(); i++) {
+                int index = array.getInt(i);
+                if (index >= 0 && index < tracks.size() && !queue.contains(index)) queue.add(index);
+            }
+        } catch (JSONException ignored) {
+            prefs.edit().remove("music_queue").apply();
+        }
+        playingTrack = prefs.getInt("music_current_track", -1);
+        if (playingTrack < 0 || playingTrack >= tracks.size()) playingTrack = -1;
+    }
+
+    private void saveTrackList() {
+        JSONArray array = new JSONArray();
+        for (Track track : tracks) {
+            try {
+                JSONObject item = new JSONObject();
+                item.put("title", track.title);
+                item.put("artist", track.artist);
+                item.put("album", track.album);
+                item.put("uri", track.uri.toString());
+                item.put("album_id", track.albumId);
+                array.put(item);
+            } catch (JSONException ignored) { }
+        }
+        prefs.edit().putString(AUDIO_LIST, array.toString()).apply();
+    }
+
     private void requestAudioPermission() {
         String permission = Build.VERSION.SDK_INT >= 33 ? Manifest.permission.READ_MEDIA_AUDIO : Manifest.permission.READ_EXTERNAL_STORAGE;
         if (Build.VERSION.SDK_INT < 23 || ContextCompat.checkSelfPermission(this, permission) == PackageManager.PERMISSION_GRANTED) {
@@ -1137,27 +1646,51 @@ public class MainActivity extends AppCompatActivity {
             String permission = Build.VERSION.SDK_INT >= 33 ? Manifest.permission.READ_MEDIA_AUDIO : Manifest.permission.READ_EXTERNAL_STORAGE;
             if (ContextCompat.checkSelfPermission(this, permission) != PackageManager.PERMISSION_GRANTED) return;
         }
-        Uri collection = MediaStore.Audio.Media.EXTERNAL_CONTENT_URI;
-        String[] projection = {MediaStore.Audio.Media._ID, MediaStore.Audio.Media.TITLE,
-                MediaStore.Audio.Media.ARTIST, MediaStore.Audio.Media.ALBUM, MediaStore.Audio.Media.ALBUM_ID};
-        try (Cursor cursor = getContentResolver().query(collection, projection,
-                MediaStore.Audio.Media.IS_MUSIC + " != 0", null, MediaStore.Audio.Media.TITLE + " COLLATE NOCASE")) {
-            if (cursor == null) return;
-            int idColumn = cursor.getColumnIndexOrThrow(MediaStore.Audio.Media._ID);
-            int titleColumn = cursor.getColumnIndexOrThrow(MediaStore.Audio.Media.TITLE);
-            int artistColumn = cursor.getColumnIndexOrThrow(MediaStore.Audio.Media.ARTIST);
-            int albumColumn = cursor.getColumnIndexOrThrow(MediaStore.Audio.Media.ALBUM);
-            int albumIdColumn = cursor.getColumnIndexOrThrow(MediaStore.Audio.Media.ALBUM_ID);
-            while (cursor.moveToNext()) {
-                Uri uri = ContentUris.withAppendedId(collection, cursor.getLong(idColumn));
-                long albumId = cursor.getLong(albumIdColumn);
-                if (!containsTrack(uri)) tracks.add(new Track(cursor.getString(titleColumn), cursor.getString(artistColumn),
-                        cursor.getString(albumColumn), uri, albumId, null));
+        if (loadingTracks) return;
+        loadingTracks = true;
+        ioExecutor.execute(() -> {
+            List<Track> discovered = new ArrayList<>();
+            boolean accessDenied = false;
+            Uri collection = MediaStore.Audio.Media.EXTERNAL_CONTENT_URI;
+            String[] projection = {MediaStore.Audio.Media._ID, MediaStore.Audio.Media.TITLE,
+                    MediaStore.Audio.Media.ARTIST, MediaStore.Audio.Media.ALBUM, MediaStore.Audio.Media.ALBUM_ID};
+            try (Cursor cursor = getContentResolver().query(collection, projection,
+                    MediaStore.Audio.Media.IS_MUSIC + " != 0", null,
+                    MediaStore.Audio.Media.TITLE + " COLLATE NOCASE")) {
+                if (cursor != null) {
+                    int idColumn = cursor.getColumnIndexOrThrow(MediaStore.Audio.Media._ID);
+                    int titleColumn = cursor.getColumnIndexOrThrow(MediaStore.Audio.Media.TITLE);
+                    int artistColumn = cursor.getColumnIndexOrThrow(MediaStore.Audio.Media.ARTIST);
+                    int albumColumn = cursor.getColumnIndexOrThrow(MediaStore.Audio.Media.ALBUM);
+                    int albumIdColumn = cursor.getColumnIndexOrThrow(MediaStore.Audio.Media.ALBUM_ID);
+                    while (cursor.moveToNext()) {
+                        Uri uri = ContentUris.withAppendedId(collection, cursor.getLong(idColumn));
+                        discovered.add(new Track(cursor.getString(titleColumn), cursor.getString(artistColumn),
+                                cursor.getString(albumColumn), uri, cursor.getLong(albumIdColumn), null));
+                    }
+                }
+            } catch (SecurityException e) {
+                accessDenied = true;
             }
-
-        } catch (SecurityException ignored) {
-            Toast.makeText(this, "Music library access was not granted.", Toast.LENGTH_SHORT).show();
-        }
+            boolean finalAccessDenied = accessDenied;
+            runOnUiThread(() -> {
+                loadingTracks = false;
+                if (isFinishing() || isDestroyed()) return;
+                tracksLoaded = true;
+                boolean changed = false;
+                for (Track track : discovered) {
+                    if (!containsTrack(track.uri)) {
+                        tracks.add(track);
+                        changed = true;
+                    }
+                }
+                if (changed) saveTrackList();
+                if (finalAccessDenied) {
+                    Toast.makeText(this, "Music library access was not granted.", Toast.LENGTH_SHORT).show();
+                }
+                if ("Music".equals(activeScreen)) showMusic();
+            });
+        });
     }
 
     private boolean containsTrack(Uri uri) {
@@ -1170,9 +1703,21 @@ public class MainActivity extends AppCompatActivity {
         if (!queue.contains(index)) queue.add(index);
         stopAudio();
         playingTrack = index;
+        saveQueue();
         try {
             mediaPlayer = new MediaPlayer();
             mediaPlayer.setDataSource(this, tracks.get(index).uri);
+            final int failedTrack = index;
+            mediaPlayer.setOnErrorListener((player, what, extra) -> {
+                stopAudio();
+                queue.remove((Integer) failedTrack);
+                saveQueue();
+                Toast.makeText(this, "This track could not be played. It was removed from the queue.",
+                        Toast.LENGTH_LONG).show();
+                refreshHomePlayer();
+                if (!queue.isEmpty()) playTrack(queue.get(0));
+                return true;
+            });
             mediaPlayer.setOnCompletionListener(mp -> {
                 refreshHomePlayer();
                 if (queue.size() > 1) playNext();
@@ -1279,6 +1824,7 @@ public class MainActivity extends AppCompatActivity {
         }
         noisePlaying = false;
         playingTrack = -1;
+        saveQueue();
     }
 
     private void releaseAudio() {
@@ -1301,9 +1847,12 @@ public class MainActivity extends AppCompatActivity {
         if (playerTitle != null) playerTitle.setText(currentTrackTitle());
         if (playerArtist != null) playerArtist.setText(currentTrackArtist());
         if (playerArtwork != null) {
-            Bitmap artwork = playingTrack >= 0 && playingTrack < tracks.size() ? loadArtwork(tracks.get(playingTrack)) : null;
-            playerArtwork.setImageBitmap(artwork);
-            playerArtwork.setBackground(artwork == null ? makeArtworkBackground() : null);
+            if (playingTrack >= 0 && playingTrack < tracks.size()) {
+                requestArtwork(tracks.get(playingTrack), playerArtwork);
+            } else {
+                playerArtwork.setImageDrawable(null);
+                playerArtwork.setBackground(makeArtworkBackground());
+            }
         }
         if (playerPlayButton != null) {
             boolean playing = isAudioPlaying();
@@ -1326,12 +1875,13 @@ public class MainActivity extends AppCompatActivity {
         LinearLayout actions = row();
         MaterialButton add = button("Add PDF");
         add.setIconResource(R.drawable.ic_add);
-        add.setIconTintList(android.content.res.ColorStateList.valueOf(Color.WHITE));
-        add.setMinHeight(dp(42));
+        add.setIconTint(android.content.res.ColorStateList.valueOf(Color.WHITE));
+        add.setMinHeight(dp(48));
+        add.setContentDescription("Add PDF document");
         add.setOnClickListener(v -> pickPdf());
         actions.addView(add, new LinearLayout.LayoutParams(0, dp(42), 1));
         MaterialButton scan = button(scanningPdfs ? "Scanning…" : "Scan folder");
-        scan.setMinHeight(dp(42));
+        scan.setMinHeight(dp(48));
         scan.setEnabled(!scanningPdfs);
         LinearLayout.LayoutParams scanParams = new LinearLayout.LayoutParams(0, dp(42), 1);
         scanParams.leftMargin = dp(8);
@@ -1393,6 +1943,10 @@ public class MainActivity extends AppCompatActivity {
             chevron.setImageTintList(android.content.res.ColorStateList.valueOf(Color.LTGRAY));
             details.addView(chevron, new LinearLayout.LayoutParams(dp(24), dp(24)));
             item.addView(details);
+            item.setMinimumHeight(dp(72));
+            item.setClickable(true);
+            item.setFocusable(true);
+            item.setContentDescription("Open PDF " + pdf.title);
             LinearLayout.LayoutParams params = new LinearLayout.LayoutParams(-1, -2);
             params.topMargin = dp(5);
             list.addView(item, params);
@@ -1566,11 +2120,36 @@ public class MainActivity extends AppCompatActivity {
         super.onActivityResult(requestCode, resultCode, data);
         if (resultCode != RESULT_OK || data == null || data.getData() == null) return;
         Uri uri = data.getData();
-        if (requestCode == REQUEST_PDF) {
-            try {
-                getContentResolver().takePersistableUriPermission(uri, Intent.FLAG_GRANT_READ_URI_PERMISSION);
-            } catch (SecurityException e) {
-                Toast.makeText(this, "This provider may not keep PDF access after Focus closes.", Toast.LENGTH_LONG).show();
+        if (requestCode == REQUEST_PDF || requestCode == REQUEST_PDF_RECONNECT) {
+            persistReadPermission(uri);
+            String reconnectUri = prefs.getString("pdf_reconnect_uri", "");
+            if (requestCode == REQUEST_PDF_RECONNECT && !reconnectUri.isEmpty()) {
+                PdfItem previous = null;
+                for (PdfItem pdf : pdfs) {
+                    if (pdf.uri.toString().equals(reconnectUri)) {
+                        previous = pdf;
+                        break;
+                    }
+                }
+                if (previous != null) {
+                    pdfs.remove(previous);
+                    PdfItem restored = new PdfItem(previous.title, uri);
+                    pdfs.add(0, restored);
+                    android.content.SharedPreferences.Editor editor = prefs.edit();
+                    String oldUri = previous.uri.toString();
+                    int page = prefs.getInt("pdf_page:" + oldUri, 0);
+                    int pageCount = prefs.getInt("pdf_pages:" + oldUri, 0);
+                    if (prefs.contains("pdf_page:" + oldUri)) editor.putInt("pdf_page:" + uri, page);
+                    if (prefs.contains("pdf_pages:" + oldUri)) editor.putInt("pdf_pages:" + uri, pageCount);
+                    editor.remove("pdf_page:" + oldUri).remove("pdf_pages:" + oldUri)
+                            .remove("pdf_reconnect_uri").apply();
+                } else {
+                    prefs.edit().remove("pdf_reconnect_uri").apply();
+                    pdfs.add(0, new PdfItem(getDisplayName(uri), uri));
+                }
+                savePdfList();
+                openPdf(pdfs.get(0));
+                return;
             }
             for (PdfItem pdf : pdfs) if (pdf.uri.equals(uri)) {
                 openPdf(pdf);
@@ -1591,6 +2170,7 @@ public class MainActivity extends AppCompatActivity {
             if (index < 0) {
                 tracks.add(readTrackMetadata(uri));
                 index = tracks.size() - 1;
+                saveTrackList();
             }
             playTrack(index);
         } else if (requestCode == REQUEST_PDF_FOLDER) {
@@ -1651,9 +2231,9 @@ public class MainActivity extends AppCompatActivity {
         activePdf = pdf;
         prefs.edit().putString("last_pdf_uri", pdf.uri.toString()).apply();
         currentPage = prefs.getInt("pdf_page:" + pdf.uri, 0);
-        pageRotated = true;
+        pageRotated = prefs.getBoolean("pdf_rotate:" + pdf.uri, false);
         readerControlsVisible = true;
-        setRequestedOrientation(android.content.pm.ActivityInfo.SCREEN_ORIENTATION_LANDSCAPE);
+        setRequestedOrientation(android.content.pm.ActivityInfo.SCREEN_ORIENTATION_UNSPECIFIED);
         readerRoot = new FrameLayout(this);
         readerRoot.setBackgroundColor(Color.rgb(17, 19, 24));
         LinearLayout reader = column();
@@ -1674,6 +2254,34 @@ public class MainActivity extends AppCompatActivity {
         readerPageLabel = text("", 12, Color.LTGRAY);
         readerPageLabel.setGravity(Gravity.CENTER);
         readerControls.addView(readerPageLabel);
+        TextInputEditText pageJump = new TextInputEditText(this);
+        pageJump.setInputType(android.text.InputType.TYPE_CLASS_NUMBER);
+        pageJump.setSingleLine(true);
+        pageJump.setTextSize(12);
+        pageJump.setTextColor(Color.WHITE);
+        pageJump.setHint("Page");
+        pageJump.setHintTextColor(Color.GRAY);
+        pageJump.setMinWidth(dp(64));
+        pageJump.setImeOptions(android.view.inputmethod.EditorInfo.IME_ACTION_GO);
+        pageJump.setOnEditorActionListener((view, actionId, event) -> {
+            if (actionId == android.view.inputmethod.EditorInfo.IME_ACTION_GO
+                    || event != null && event.getKeyCode() == android.view.KeyEvent.KEYCODE_ENTER) {
+                try {
+                    int requestedPage = Integer.parseInt(String.valueOf(view.getText())) - 1;
+                    if (requestedPage >= 0 && renderer != null && requestedPage < renderer.getPageCount()) {
+                        renderPage(requestedPage);
+                    } else {
+                        Toast.makeText(this, "Enter a page from 1 to "
+                                + (renderer == null ? 0 : renderer.getPageCount()), Toast.LENGTH_SHORT).show();
+                    }
+                } catch (NumberFormatException ignored) {
+                    Toast.makeText(this, "Enter a valid page number", Toast.LENGTH_SHORT).show();
+                }
+                return true;
+            }
+            return false;
+        });
+        readerControls.addView(pageJump, new LinearLayout.LayoutParams(dp(72), dp(44)));
         readerPlayerLabel = text(currentTrackTitle(), 12, Color.WHITE);
         readerPlayerLabel.setMaxWidth(dp(130));
         readerPlayerLabel.setSingleLine(true);
@@ -1690,6 +2298,7 @@ public class MainActivity extends AppCompatActivity {
         readerControls.addView(next);
         MaterialButton rotate = iconButton(R.drawable.ic_rotate_right, "Rotate PDF page", () -> {
             pageRotated = !pageRotated;
+            prefs.edit().putBoolean("pdf_rotate:" + activePdf.uri, pageRotated).apply();
             renderPage(currentPage);
         });
         readerControls.addView(rotate);
@@ -1711,7 +2320,7 @@ public class MainActivity extends AppCompatActivity {
         readerRoot.addView(show, showParams);
         show.setVisibility(View.GONE);
         readerRoot.setTag(show);
-        setScreenContent(readerRoot);
+        setScreenContent(readerRoot, false);
         try {
             pdfDescriptor = getContentResolver().openFileDescriptor(pdf.uri, "r");
             if (pdfDescriptor == null) throw new IOException("Unable to open document");
@@ -1722,8 +2331,34 @@ public class MainActivity extends AppCompatActivity {
             renderPage(currentPage);
         } catch (IOException | SecurityException e) {
             closePdf();
-            Toast.makeText(this, "This PDF is no longer available. Add it to the library again.", Toast.LENGTH_LONG).show();
-            showPdfLibrary();
+            promptReconnectPdf(pdf);
+        }
+    }
+
+    private void promptReconnectPdf(PdfItem pdf) {
+        prefs.edit().putString("pdf_reconnect_uri", pdf.uri.toString()).apply();
+        new MaterialAlertDialogBuilder(this)
+                .setTitle("Reconnect this PDF")
+                .setMessage("Android revoked access to \"" + pdf.title
+                        + "\" after the app was closed. Choose the same file again; your reading page will be kept.")
+                .setNegativeButton("Later", (dialog, which) -> showPdfLibrary())
+                .setPositiveButton("Choose PDF", (dialog, which) -> {
+                    Intent intent = new Intent(Intent.ACTION_OPEN_DOCUMENT);
+                    intent.addCategory(Intent.CATEGORY_OPENABLE);
+                    intent.setType("application/pdf");
+                    intent.addFlags(Intent.FLAG_GRANT_READ_URI_PERMISSION | Intent.FLAG_GRANT_PERSISTABLE_URI_PERMISSION);
+                    startActivityForResult(intent, REQUEST_PDF_RECONNECT);
+                })
+                .setCancelable(false)
+                .show();
+    }
+
+    private void persistReadPermission(Uri uri) {
+        try {
+            getContentResolver().takePersistableUriPermission(uri, Intent.FLAG_GRANT_READ_URI_PERMISSION);
+        } catch (SecurityException ignored) {
+            Toast.makeText(this, "This file provider does not allow persistent access after reopening.",
+                    Toast.LENGTH_LONG).show();
         }
     }
 
@@ -1928,10 +2563,15 @@ public class MainActivity extends AppCompatActivity {
                 @Override
                 public boolean onScale(ScaleGestureDetector detector) {
                     float oldZoom = zoom;
-                    zoom = Math.max(1f, Math.min(6f, zoom * detector.getScaleFactor()));
-                    float factor = zoom / oldZoom;
-                    offsetX = detector.getFocusX() - (detector.getFocusX() - offsetX) * factor;
-                    offsetY = detector.getFocusY() - (detector.getFocusY() - offsetY) * factor;
+                    float newZoom = Math.max(1f, Math.min(6f, oldZoom * detector.getScaleFactor()));
+                    if (bitmap == null || bitmap.isRecycled()) return false;
+                    float fit = fitScale();
+                    float anchorX = (detector.getFocusX() - getWidth() / 2f - offsetX) / (fit * oldZoom);
+                    float anchorY = (detector.getFocusY() - getHeight() / 2f - offsetY) / (fit * oldZoom);
+                    zoom = newZoom;
+                    offsetX = detector.getFocusX() - getWidth() / 2f - anchorX * fit * zoom;
+                    offsetY = detector.getFocusY() - getHeight() / 2f - anchorY * fit * zoom;
+                    clampOffset();
                     invalidate();
                     return true;
                 }
@@ -1940,13 +2580,18 @@ public class MainActivity extends AppCompatActivity {
                     new android.view.GestureDetector.SimpleOnGestureListener() {
                         @Override
                         public boolean onDoubleTap(MotionEvent event) {
+                            float oldZoom = zoom;
                             zoom = zoom > 1.05f ? 1f : 2.5f;
                             if (zoom == 1f) {
                                 offsetX = 0;
                                 offsetY = 0;
                             } else {
-                                offsetX = getWidth() / 2f - event.getX();
-                                offsetY = getHeight() / 2f - event.getY();
+                                float fit = fitScale();
+                                float anchorX = (event.getX() - getWidth() / 2f - offsetX) / (fit * oldZoom);
+                                float anchorY = (event.getY() - getHeight() / 2f - offsetY) / (fit * oldZoom);
+                                offsetX = event.getX() - getWidth() / 2f - anchorX * fit * zoom;
+                                offsetY = event.getY() - getHeight() / 2f - anchorY * fit * zoom;
+                                clampOffset();
                             }
                             invalidate();
                             return true;
@@ -1964,11 +2609,30 @@ public class MainActivity extends AppCompatActivity {
             invalidate();
         }
 
+        private float fitScale() {
+            if (bitmap == null || bitmap.isRecycled()) return 1f;
+            return Math.min((float) getWidth() / bitmap.getWidth(), (float) getHeight() / bitmap.getHeight());
+        }
+
+        private void clampOffset() {
+            if (zoom <= 1f) {
+                offsetX = 0;
+                offsetY = 0;
+                return;
+            }
+            float scaledWidth = bitmap.getWidth() * fitScale() * zoom;
+            float scaledHeight = bitmap.getHeight() * fitScale() * zoom;
+            float horizontalLimit = Math.max(0, (scaledWidth - getWidth()) / 2f);
+            float verticalLimit = Math.max(0, (scaledHeight - getHeight()) / 2f);
+            offsetX = Math.max(-horizontalLimit, Math.min(horizontalLimit, offsetX));
+            offsetY = Math.max(-verticalLimit, Math.min(verticalLimit, offsetY));
+        }
+
         @Override
         protected void onDraw(Canvas canvas) {
             super.onDraw(canvas);
             if (bitmap == null || bitmap.isRecycled()) return;
-            float fit = Math.min((float) getWidth() / bitmap.getWidth(), (float) getHeight() / bitmap.getHeight());
+            float fit = fitScale();
             canvas.save();
             canvas.translate(getWidth() / 2f + offsetX, getHeight() / 2f + offsetY);
             canvas.rotate(rotation);
@@ -2003,6 +2667,7 @@ public class MainActivity extends AppCompatActivity {
                     } else if (!scaleDetector.isInProgress()) {
                         offsetX += event.getX() - lastX;
                         offsetY += event.getY() - lastY;
+                        clampOffset();
                     }
                     lastX = event.getX();
                     lastY = event.getY();
